@@ -1,10 +1,6 @@
-use crate::{node::WeakNodeRef, rpc::Network, util::{Hash, Peer, RpcOp, SinglePeer, timestamp}};
-use futures::executor::block_on;
-#[cfg(test)]
-use no_deadlocks::Mutex;
+use crate::{node::{Node, NodeRef, WeakNodeRef, Pinger}, rpc::Network, util::{timestamp, Hash, Peer, RpcOp, SinglePeer}};
+use tokio::sync::Mutex;
 use std::sync::Arc;
-#[cfg(not(test))]
-use std::sync::Mutex;
 use tracing::debug;
 
 const KEY_SIZE: usize = 64;
@@ -15,29 +11,29 @@ const MISSED_MESSAGES_ALLOWED: usize = 3;
 const CACHE_SIZE: usize = 3;
 const ALPHA: usize = 3;
 
-pub struct Bucket {
-    pub last_seen: u64,
-    pub peers: Vec<Peer>,
-    pub cache: Vec<Peer>,
+pub(crate) struct Bucket {
+    pub(crate) last_seen: u64,
+    pub(crate) peers: Vec<Peer>,
+    pub(crate) cache: Vec<Peer>,
 }
 
-pub struct Trie {
-    pub prefix: Hash,
-    pub cutoff: usize,
-    pub bucket: Option<Bucket>,
-    pub left: TrieRef,
-    pub right: TrieRef,
+pub(crate) struct Trie {
+    pub(crate) prefix: Hash,
+    pub(crate) cutoff: usize,
+    pub(crate) bucket: Option<Bucket>,
+    pub(crate) left: TrieRef,
+    pub(crate) right: TrieRef,
 }
 
-pub struct RoutingTable {
-    pub id: Hash,
+pub(crate) struct RoutingTable {
+    pub(crate) id: Hash,
     root: TrieRef,
     node: WeakNodeRef,
 }
 
-pub type InnerTrieRef = Arc<Mutex<Trie>>;
-pub type TrieRef = Option<InnerTrieRef>;
-pub type TableRef = Arc<Mutex<RoutingTable>>;
+pub(crate) type InnerTrieRef = Arc<Mutex<Trie>>;
+pub(crate) type TrieRef = Option<InnerTrieRef>;
+pub(crate) type TableRef = Arc<Mutex<RoutingTable>>;
 
 impl Bucket {
     fn new() -> Self {
@@ -48,14 +44,14 @@ impl Bucket {
         }
     }
 
-    pub fn add_peer(&mut self, peer: Peer) {
+    pub(crate) fn add_peer(&mut self, peer: Peer) {
         debug!("added peer {:#x}", peer.id);
 
         self.peers.push(peer);
         self.last_seen = timestamp();
     }
 
-    pub fn update_cached_peer(&mut self, peer: Peer) {
+    pub(crate) fn update_cached_peer(&mut self, peer: Peer) {
         // exists in cache?
         if let Some(idx) = self.cache.iter().position(|x| x.id == peer.id) {
             // move to end
@@ -107,7 +103,7 @@ impl Bucket {
 
 impl Trie {
     // create a new trie node
-    pub fn new(pre: Hash, cut: usize, leaf: bool) -> InnerTrieRef {
+    pub(crate) fn new(pre: Hash, cut: usize, leaf: bool) -> InnerTrieRef {
         Arc::new(Mutex::new(Trie {
             prefix: pre,
             cutoff: cut,
@@ -125,20 +121,16 @@ impl Trie {
 
             self.right = Some(Trie::new(self.prefix | new_bit, self.cutoff + 1, true));
 
-            let mut l_lock = self.left.as_ref().unwrap().lock().unwrap();
+            let mut l_lock = self.left.as_ref().unwrap().blocking_lock();
             let l_bkt = l_lock.bucket.as_mut().unwrap();
-            let mut r_lock = self.right.as_ref().unwrap().lock().unwrap();
+            let mut r_lock = self.right.as_ref().unwrap().blocking_lock();
             let r_bkt = r_lock.bucket.as_mut().unwrap();
-
-            debug!("mask: {:#x}", new_bit);
 
             // split based on new cutoff bit
             for peer in &bkt.peers {
                 if (peer.id & new_bit) == Hash::zero() {
-                    debug!("peer {:#x} going left", peer.id);
                     l_bkt.peers.push(peer.clone());
                 } else {
-                    debug!("peer {:#x} going right", peer.id);
                     r_bkt.peers.push(peer.clone());
                 };
             }
@@ -153,7 +145,7 @@ impl Trie {
 }
 
 impl RoutingTable {
-    pub fn new(i: Hash, n: WeakNodeRef) -> TableRef {
+    pub(crate) fn new(i: Hash, n: WeakNodeRef) -> TableRef {
         let rt = Arc::new(Mutex::new(RoutingTable {
             id: i,
             root: None,
@@ -161,7 +153,7 @@ impl RoutingTable {
         }));
 
         {
-            let mut rt_ref = rt.lock().unwrap();
+            let mut rt_ref = rt.blocking_lock();
             rt_ref.root = Some(Trie::new(Hash::zero(), 0, true));
         }
 
@@ -169,7 +161,7 @@ impl RoutingTable {
     }
 
     fn traverse(node: TrieRef, key: Hash, cutoff: usize) -> TrieRef {
-        let current = node.as_ref().unwrap().lock().unwrap();
+        let current = node.as_ref().unwrap().blocking_lock();
 
         if let (None, None, Some(_)) = (&current.left, &current.right, &current.bucket) {
             drop(current);
@@ -177,10 +169,8 @@ impl RoutingTable {
         }
 
         let next = if key & (Hash::from(1usize) << (KEY_SIZE - cutoff - 1)) == Hash::zero() {
-            debug!("traverse left");
             Some(current.left.as_ref().unwrap().clone())
         } else {
-            debug!("traverse right");
             Some(current.right.as_ref().unwrap().clone())
         };
 
@@ -192,12 +182,12 @@ impl RoutingTable {
         }
     }
 
-    pub fn find(table: TableRef, id: Hash) -> Option<Peer> {
-        let lock = table.lock().unwrap();
+    pub(crate) fn find(table: TableRef, id: Hash) -> Option<Peer> {
+        let lock = table.blocking_lock();
         let root = lock.root.as_ref().unwrap();
 
         if let Some(trie) = Self::traverse(Some(root.clone()), id, 0) {
-            let lock = trie.lock().unwrap();
+            let lock = trie.blocking_lock();
 
             if let Some(bucket) = &lock.bucket {
                 bucket.peers.iter().find(|x| x.id == id).cloned()
@@ -209,22 +199,18 @@ impl RoutingTable {
         }
     }
 
-    pub fn update<N: Network + Sync + Send + 'static>(
-        network: &mut N,
-        table: TableRef,
-        peer: Peer,
-    ) {
+    pub(crate) fn update<P: Pinger>(table: TableRef, peer: Peer) {
         let n;
         {
-            let lock = table.as_ref().lock().unwrap();
+            let lock = table.as_ref().blocking_lock();
             let root = lock.root.as_ref().unwrap();
 
             n = Self::traverse(Some(root.clone()), peer.id, 0);
         }
 
-        let mut trie = n.as_ref().unwrap().lock().unwrap();
+        let mut trie = n.as_ref().unwrap().blocking_lock();
 
-        Self::update_trie(table.clone(), &mut trie, network, peer);
+        Self::update_trie::<P>(table.clone(), &mut trie, peer);
     }
 
     fn responded(trie: &mut Trie, peer: &SinglePeer) {
@@ -278,8 +264,6 @@ impl RoutingTable {
             if let Some(bkt_idx) = bkt.peers.iter().position(|x| x.id == peer.id) {
                 let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
 
-                debug!("getting for address {:?}", peer.addr);
-
                 if let Some(addr_idx) = bkt_entry.addresses.iter().position(|x| x.0 == peer.addr) {
                     let addr_entry = bkt_entry.addresses.get_mut(addr_idx).unwrap();
 
@@ -312,14 +296,9 @@ impl RoutingTable {
         }
     }
 
-    fn update_trie<N: Network + Sync + Send + 'static>(
-        tbl: TableRef,
-        trie: &mut Trie,
-        network: &mut N,
-        peer: Peer,
-    ) {
+    fn update_trie<P: Pinger>(tbl: TableRef, trie: &mut Trie, peer: Peer) {
         if let Some(bkt) = &mut trie.bucket {
-            let table = tbl.lock().unwrap();
+            let table = tbl.blocking_lock();
 
             let mask: Hash = Hash::max_value() << (KEY_SIZE - trie.cutoff);
 
@@ -345,28 +324,18 @@ impl RoutingTable {
 
                     let front = bkt.peers.first().unwrap().clone();
 
-                    block_on(async move {
-                        let args;
+                    let node = table.node.upgrade().unwrap();
 
-                        {
-                            let node = table.node.upgrade().unwrap();
-                            let node_lock = node.lock().unwrap();
-                            let crypto = node_lock.crypto.lock().unwrap();
-
-                            args = crypto.args(peer.id, RpcOp::Ping, node_lock.addr, timestamp());
+                    match P::ping_peer(node, front) {
+                        Ok(resp) => {
+                            debug!("responded, updating");
+                            Self::responded(trie, &resp);
                         }
-
-                        match N::check_liveness(network, front.clone(), args).await {
-                            Ok(resp) => {
-                                debug!("responded, updating");
-                                Self::responded(trie, &resp);
-                            }
-                            Err(unresp) => {
-                                debug!("did not respond, making stale");
-                                Self::stale(trie, &unresp, peer);
-                            }
+                        Err(unresp) => {
+                            debug!("did not respond, making stale");
+                            Self::stale(trie, &unresp, peer);
                         }
-                    });
+                    }
                 }
             } else if nearby {
                 // bucket is full and within prefix, split
@@ -383,7 +352,7 @@ impl RoutingTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::{node::Node, rpc::MockNetwork, util::RpcArgs};
+    use crate::node::{Node, RealPinger, ResponsiveMockPinger, UnresponsiveMockPinger};
 
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
@@ -411,13 +380,14 @@ mod tests {
     #[test]
     fn add_single_peer() {
         if let Ok(node) = Node::new(16161, false, true) {
-            let mut binding = node.lock().unwrap();
+            let mut binding = node.blocking_lock();
             let table = binding.table.as_ref().unwrap().clone();
+            let pinger = RealPinger::default();
+            
+            RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(None));
 
-            RoutingTable::update(&mut binding.network, table.clone(), generate_peer(None));
-
-            let inner = table.lock().unwrap();
-            let root = inner.root.as_ref().unwrap().lock().unwrap();
+            let inner = table.blocking_lock();
+            let root = inner.root.as_ref().unwrap().blocking_lock();
             let bkt = root.bucket.as_ref().unwrap();
 
             assert_eq!(bkt.peers.len(), 1);
@@ -435,7 +405,7 @@ mod tests {
         let mask: Hash = Hash::from(1) << (KEY_SIZE - (t.cutoff + 1));
 
         {
-            let left = t.left.as_ref().unwrap().lock().unwrap();
+            let left = t.left.as_ref().unwrap().blocking_lock();
             if let Some(bkt) = &left.bucket {
                 for entry in &bkt.peers {
                     if entry.id & mask != Hash::zero() {
@@ -448,7 +418,7 @@ mod tests {
         }
 
         {
-            let right = t.right.as_ref().unwrap().lock().unwrap();
+            let right = t.right.as_ref().unwrap().blocking_lock();
             if let Some(bkt) = &right.bucket {
                 for entry in &bkt.peers {
                     if entry.id & mask == Hash::zero() {
@@ -469,75 +439,70 @@ mod tests {
         if let Ok(node) = Node::new(16161, false, true) {
             let table;
             {
-                let binding = node.lock().unwrap();
+                let binding = node.blocking_lock();
                 table = binding.table.as_ref().unwrap().clone();
             }
 
-            let mut mock = MockNetwork::new();
             let temp = Hash::from(1) << (KEY_SIZE - 1);
 
             {
-                let mut lock = table.lock().unwrap();
+                let mut lock = table.blocking_lock();
                 lock.id = temp;
             }
 
-            mock.expect_connect().returning(|_| Err("")?);
-
             for i in 0..BUCKET_SIZE {
-                RoutingTable::update(&mut mock, table.clone(), generate_peer(Some(Hash::from(i))));
+                RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
             }
 
-            RoutingTable::update(
-                &mut mock,
+            RoutingTable::update::<ResponsiveMockPinger>(
                 table.clone(),
                 generate_peer(Some(Hash::from(3) << (KEY_SIZE - 2))),
             );
 
             {
-                let inner = table.lock().unwrap();
-                let root = inner.root.as_ref().unwrap().lock().unwrap();
+                let inner = table.blocking_lock();
+                let root = inner.root.as_ref().unwrap().blocking_lock();
 
                 validate_tree(&root);
 
                 {
                     let b = root.left.as_ref().unwrap();
-                    let left = b.lock().unwrap();
+                    let left = b.blocking_lock();
                     assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
                 }
 
                 {
                     let b = root.right.as_ref().unwrap();
-                    let right = b.lock().unwrap();
+                    let right = b.blocking_lock();
                     assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
                 }
             }
 
             for i in 0..BUCKET_SIZE {
-                RoutingTable::update(
-                    &mut mock,
+                RoutingTable::update::<ResponsiveMockPinger>(
                     table.clone(),
                     generate_peer(Some(temp | Hash::from(i))),
                 );
             }
 
             {
-                let inner = table.lock().unwrap();
-                let root = inner.root.as_ref().unwrap().lock().unwrap();
+                let inner = table.blocking_lock();
+                let root = inner.root.as_ref().unwrap().blocking_lock();
 
                 let r = root.right.as_ref().unwrap().clone();
-                let lock = r.lock().unwrap();
+                let lock = r.blocking_lock();
 
                 validate_tree(&lock);
 
                 {
                     let b = lock.left.as_ref().unwrap();
-                    let left = b.lock().unwrap();
+                    let left = b.blocking_lock();
                     assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
                 }
 
                 {
                     let b = lock.right.as_ref().unwrap();
-                    let right = b.lock().unwrap();
+                    let right = b.blocking_lock();
                     assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
                 }
             }
@@ -550,55 +515,40 @@ mod tests {
         if let Ok(node) = Node::new(16161, false, true) {
             let table;
             {
-                let binding = node.lock().unwrap();
+                let binding = node.blocking_lock();
                 table = binding.table.as_ref().unwrap().clone();
             }
 
-            let mut mock = MockNetwork::new();
             let temp = Hash::from(1) << (KEY_SIZE - 1);
 
             {
-                let mut lock = table.lock().unwrap();
+                let mut lock = table.blocking_lock();
                 lock.id = temp;
             }
 
             for i in 0..BUCKET_SIZE {
-                RoutingTable::update(
-                    &mut mock,
+                RoutingTable::update::<ResponsiveMockPinger>(
                     table.clone(),
                     generate_peer(Some(temp | Hash::from(i))),
                 );
             }
 
-            mock.expect_check_liveness()
-                .returning(|x: Peer, _: RpcArgs| {
-                    Ok(SinglePeer {
-                        id: x.id,
-                        addr: x.addresses.first().unwrap().0,
-                    })
-                });
-
             // insert far nodes
             for i in 0..(BUCKET_SIZE) {
-                RoutingTable::update(&mut mock, table.clone(), generate_peer(Some(Hash::from(i))));
+                RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
             }
 
-            debug!("added more far nodes");
-
             for i in 2..(BUCKET_SIZE + 2) {
-                RoutingTable::update(
-                    &mut mock,
+                RoutingTable::update::<ResponsiveMockPinger>(
                     table.clone(),
                     generate_peer(Some(Hash::from(70 | i))),
                 );
             }
 
-            debug!("added even more far nodes");
-
             {
-                let lock = table.lock().unwrap();
-                let root = lock.root.as_ref().unwrap().lock().unwrap();
-                let left = root.left.as_ref().unwrap().lock().unwrap();
+                let lock = table.blocking_lock();
+                let root = lock.root.as_ref().unwrap().blocking_lock();
+                let left = root.left.as_ref().unwrap().blocking_lock();
 
                 assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
             }
@@ -611,47 +561,36 @@ mod tests {
         if let Ok(node) = Node::new(16161, false, true) {
             let table;
             {
-                let binding = node.lock().unwrap();
+                let binding = node.blocking_lock();
                 table = binding.table.as_ref().unwrap().clone();
             }
 
-            let mut mock = MockNetwork::new();
             let temp = Hash::from(1) << (KEY_SIZE - 1);
 
             {
-                let mut lock = table.lock().unwrap();
+                let mut lock = table.blocking_lock();
                 lock.id = temp;
             }
 
             for i in 0..BUCKET_SIZE {
-                RoutingTable::update(
-                    &mut mock,
+                RoutingTable::update::<ResponsiveMockPinger>(
                     table.clone(),
                     generate_peer(Some(temp | Hash::from(i))),
                 );
             }
 
-            mock.expect_check_liveness()
-                .returning(|x: Peer, _: RpcArgs| {
-                    Err(SinglePeer {
-                        id: x.id,
-                        addr: x.addresses.first().unwrap().0,
-                    })
-                });
-
             let to_stale = generate_peer(Some(Hash::from(1)));
 
-            RoutingTable::update(&mut mock, table.clone(), to_stale.clone());
+            RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
 
             // insert far nodes
             for i in 2..(BUCKET_SIZE + 1) {
-                RoutingTable::update(&mut mock, table.clone(), generate_peer(Some(Hash::from(i))));
+                RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
             }
 
             // fill replacement cache
             for i in 0..(CACHE_SIZE + 1) {
-                RoutingTable::update(
-                    &mut mock,
+                RoutingTable::update::<UnresponsiveMockPinger>(
                     table.clone(),
                     generate_peer(Some(Hash::from(70 | i))),
                 );
@@ -659,7 +598,7 @@ mod tests {
 
             // should become max staleness
             for _ in 0..=(MISSED_PINGS_ALLOWED + 1) {
-                RoutingTable::update(&mut mock, table.clone(), to_stale.clone());
+                RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
             }
 
             let stale = RoutingTable::find(table.clone(), to_stale.id);

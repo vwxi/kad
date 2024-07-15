@@ -6,28 +6,28 @@ use std::{
 use bigint::uint::U256;
 use serde::{Deserialize, Serialize};
 
-pub type Addr = (IpAddr, u16);
-pub type Hash = U256;
+pub(crate) type Addr = (IpAddr, u16);
+pub(crate) type Hash = U256;
 
 #[derive(Clone, Debug)]
-pub struct Peer {
-    pub id: Hash,
-    pub addresses: Vec<(Addr, usize)>,
+pub(crate) struct Peer {
+    pub(crate) id: Hash,
+    pub(crate) addresses: Vec<(Addr, usize)>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct SinglePeer {
-    pub id: Hash,
-    pub addr: Addr,
+pub(crate) struct SinglePeer {
+    pub(crate) id: Hash,
+    pub(crate) addr: Addr,
 }
 
-pub fn timestamp() -> u64 {
+pub(crate) fn timestamp() -> u64 {
     let t = SystemTime::now();
     t.duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum RpcOp {
+pub(crate) enum RpcOp {
     Ping,
     FindNode(Hash),
     FindValue(Hash),
@@ -35,11 +35,11 @@ pub enum RpcOp {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RpcContext {
-    pub id: Hash,
-    pub op: RpcOp,
-    pub addr: Addr,
-    pub timestamp: u64,
+pub(crate) struct RpcContext {
+    pub(crate) id: Hash,
+    pub(crate) op: RpcOp,
+    pub(crate) addr: Addr,
+    pub(crate) timestamp: u64,
 }
 
-pub type RpcArgs = (RpcContext, String);
+pub(crate) type RpcArgs = (RpcContext, String);

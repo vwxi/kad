@@ -11,18 +11,18 @@ use std::path::Path;
 
 const KEY_BITS: usize = 2048;
 
-pub struct Crypto {
-    pub private: RsaPrivateKey,
-    pub public: RsaPublicKey,
-    pub signing: SigningKey<Sha256>,
+pub(crate) struct Crypto {
+    pub(crate) private: RsaPrivateKey,
+    pub(crate) public: RsaPublicKey,
+    pub(crate) signing: SigningKey<Sha256>,
 
     // hash -> (key, last contacted (for pruning))
-    pub keystore: BTreeMap<Hash, (RsaPublicKey, u64)>,
+    pub(crate) keystore: BTreeMap<Hash, (RsaPublicKey, u64)>,
 }
 
 impl Crypto {
     // randomly generate key
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
         let mut rng = rand::thread_rng();
         let private_key = RsaPrivateKey::new(&mut rng, KEY_BITS)?;
         let public_key = RsaPublicKey::from(private_key.clone());
@@ -35,7 +35,7 @@ impl Crypto {
         })
     }
 
-    pub fn from_file(priv_file: &str, pub_file: &str) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn from_file(priv_file: &str, pub_file: &str) -> Result<Self, Box<dyn Error>> {
         let (priv_path, pub_path) = (Path::new(priv_file), Path::new(pub_file));
         let (private_key, public_key) = (
             RsaPrivateKey::read_pkcs1_pem_file(priv_path)?,
@@ -50,11 +50,11 @@ impl Crypto {
         })
     }
 
-    pub fn public_key_as_string(&self) -> Result<String, Box<dyn Error>> {
+    pub(crate) fn public_key_as_string(&self) -> Result<String, Box<dyn Error>> {
         Ok(self.public.to_pkcs1_pem(pkcs1::LineEnding::LF)?)
     }
 
-    pub fn to_file(&self, priv_file: &str, pub_file: &str) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn to_file(&self, priv_file: &str, pub_file: &str) -> Result<(), Box<dyn Error>> {
         self.private
             .write_pkcs1_pem_file(Path::new(priv_file), pkcs1::LineEnding::LF)?;
         self.public
@@ -63,14 +63,14 @@ impl Crypto {
         Ok(())
     }
 
-    pub fn sign(&self, data: &str) -> String {
+    pub(crate) fn sign(&self, data: &str) -> String {
         let mut rng = rand::thread_rng();
         self.signing
             .sign_with_rng(&mut rng, data.as_bytes())
             .to_string()
     }
 
-    pub fn verify(&mut self, id: Hash, data: &str, sig: &str) -> bool {
+    pub(crate) fn verify(&mut self, id: Hash, data: &str, sig: &str) -> bool {
         if self.keystore.contains_key(&id) {
             let entry = self.keystore.get_mut(&id).unwrap();
             let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
@@ -85,7 +85,7 @@ impl Crypto {
         }
     }
 
-    pub fn args(&self, i: Hash, o: RpcOp, a: Addr, ts: u64) -> RpcArgs {
+    pub(crate) fn args(&self, i: Hash, o: RpcOp, a: Addr, ts: u64) -> RpcArgs {
         let ctx = RpcContext {
             id: i,
             op: o,

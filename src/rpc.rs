@@ -1,42 +1,35 @@
 use crate::{node::NodeRef, util::{Addr, Peer, RpcArgs, SinglePeer}};
 use async_trait::async_trait;
 use futures::{future, prelude::*};
-#[cfg(test)]
-use mockall::{automock, predicate::*};
 use std::{error::Error, net::SocketAddr};
 use tarpc::{
     client, context,
     server::{self, incoming::Incoming, Channel},
     tokio_serde::formats::Json,
 };
+use tokio::time::timeout;
+use std::time::Duration;
 
-pub const TIMEOUT: u64 = 15;
-pub const OP_TIMEOUT: u64 = 30;
+pub(crate) const TIMEOUT: u64 = 15;
+pub(crate) const OP_TIMEOUT: u64 = 30;
 
 #[tarpc::service]
-pub trait RpcService {
+pub(crate) trait RpcService {
     async fn key() -> String;
     async fn ping(args: RpcArgs) -> bool;
     //async fn find_node(args: RpcArgs, id: Hash) -> Vec<SinglePeer>;
 }
 
 #[derive(Clone)]
-pub struct Service {
-    pub node: NodeRef,
-    pub addr: SocketAddr,
+pub(crate) struct Service {
+    pub(crate) node: NodeRef,
+    pub(crate) addr: SocketAddr,
 }
 
-impl RpcService for Service {
-    async fn key(self, _: context::Context) -> String {
-        let binding = self.node.lock().unwrap();
-        let crypto = binding.crypto.lock().unwrap();
-
-        crypto.public_key_as_string().unwrap()
-    }
-
-    async fn ping(self, _: context::Context, args: RpcArgs) -> bool {
-        let binding = self.node.lock().unwrap();
-        let mut crypto = binding.crypto.lock().unwrap();
+impl Service {
+    fn verify_args(&self, args: RpcArgs) -> bool {
+        let binding = self.node.blocking_lock();
+        let mut crypto = binding.crypto.blocking_lock();
 
         let ctx = args.0.clone();
 
@@ -48,9 +41,21 @@ impl RpcService for Service {
     }
 }
 
-#[cfg_attr(test, automock)]
+impl RpcService for Service {
+    async fn key(self, _: context::Context) -> String {
+        let binding = self.node.lock().await;
+        let crypto = binding.crypto.lock().await;
+
+        crypto.public_key_as_string().unwrap()
+    }
+
+    async fn ping(self, _: context::Context, args: RpcArgs) -> bool {
+        self.verify_args(args.clone())
+    }
+}
+
 #[async_trait]
-pub trait Network {
+pub(crate) trait Network {
     async fn spawn<F: Future<Output = ()> + Send + 'static>(fut: F) {
         tokio::spawn(fut);
     }
@@ -59,7 +64,7 @@ pub trait Network {
         let addr;
 
         {
-            let n = node.lock().unwrap();
+            let n = node.lock().await;
             addr = n.addr;
         }
 
@@ -93,7 +98,7 @@ pub trait Network {
         Ok(RpcServiceClient::new(client::Config::default(), transport.await?).spawn())
     }
 
-    async fn check_liveness(&self, peer: Peer, args: RpcArgs) -> Result<SinglePeer, SinglePeer> {
+    async fn connect_peer(&self, peer: Peer) -> Result<(RpcServiceClient, SinglePeer), SinglePeer> {
         let mut addr = peer.addresses.iter().peekable();
 
         let mut last_addr = addr.peek().unwrap().0;
@@ -103,7 +108,7 @@ pub trait Network {
                 Some(current) => {
                     last_addr = current.0;
 
-                    if let Ok(client) = self.connect(current.0).await {
+                    if let Ok(Ok(client)) = timeout(Duration::from_secs(TIMEOUT), self.connect(current.0)).await {
                         break Some(client);
                     }
                 }
@@ -116,18 +121,31 @@ pub trait Network {
             addr: last_addr,
         };
 
-        match connection {
-            Some(client) => {
-                if client.ping(context::current(), args).await.is_ok() {
-                    Ok(single_peer)
-                } else {
-                    Err(single_peer)
-                }
-            }
-            None => Err(single_peer),
+        if let Some(conn) = connection {
+            Ok((conn, single_peer))
+        } else {
+            Err(single_peer)
         }
     }
 }
 
-pub struct RealNetwork {}
+#[derive(Default)]
+pub(crate) struct RealNetwork {}
 impl Network for RealNetwork {}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+    use crate::node::Node;
+
+    #[test]
+    #[traced_test]
+    fn ping() {
+        if let (Ok(node1), Ok(node2)) = (Node::new(16161, false, true), Node::new(16162, false, true)) {
+            let (handle1, handle2) = (Node::serve(node1.clone()), Node::serve(node2.clone()));
+            
+            handle1.abort();
+            handle2.abort();
+        }
+    }
+}
