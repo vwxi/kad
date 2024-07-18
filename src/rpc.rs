@@ -1,6 +1,7 @@
 use crate::{
-    node::KadNodeRef,
-    util::{Addr, Peer, RpcArgs, RpcOp, SinglePeer},
+    node::{KadNode, KadNodeRef},
+    routing::RoutingTable,
+    util::{Addr, Hash, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
 use futures::{future, prelude::*};
@@ -19,9 +20,9 @@ pub(crate) const OP_TIMEOUT: u64 = 30;
 
 #[tarpc::service]
 pub(crate) trait RpcService {
-    async fn key() -> String;
-    async fn ping(args: RpcArgs) -> bool;
-    //async fn find_node(args: RpcArgs, id: Hash) -> Vec<SinglePeer>;
+    async fn key() -> RpcResults;
+    async fn ping() -> RpcResults;
+    async fn find_node(args: RpcArgs, id: Hash) -> RpcResults;
 }
 
 #[derive(Clone)]
@@ -31,59 +32,66 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    fn verify<F>(&self, args: &RpcArgs, backup: F) -> bool
-    where
-        F: Fn(&RpcArgs),
-    {
-        let binding = self.node.blocking_lock();
-        let mut crypto = binding.crypto.blocking_lock();
+    // get_addresses, find_node, find_value and store will have a two-step arg validation
+    pub(crate) async fn verify(&self, args: &RpcArgs) -> Result<(), RpcResults> {
+        let binding = self.node.lock().await;
+        let crypto = binding.crypto.lock().await;
 
-        let ctx = args.0.clone();
+        if crypto
+            .verify_args(args, || async {
+                let kad = binding.kad.upgrade().unwrap();
+                let handle = kad.runtime.handle();
+                let args_copy = args.clone();
+                let node_copy = self.node.clone();
 
-        if crypto.keystore.contains_key(&ctx.id) {
-            crypto.verify(
-                args.0.id,
-                serde_json::to_string(&ctx).unwrap().as_str(),
-                &args.1,
-            )
+                let _ = handle
+                    .spawn_blocking(move || {
+                        let _ =
+                            KadNode::key(node_copy, Peer::new(args_copy.0.id, args_copy.0.addr));
+                    })
+                    .await;
+            })
+            .await
+        {
+            Ok(())
         } else {
-            // if key doesn't exist, try and get it. if it still doesn't exist, give up.
-            backup(args);
-
-            if crypto.keystore.contains_key(&ctx.id) {
-                crypto.verify(
-                    args.0.id,
-                    serde_json::to_string(&ctx).unwrap().as_str(),
-                    &args.1,
-                )
-            } else {
-                false
-            }
+            Err(crypto.results(RpcResult::Bad))
         }
     }
 }
 
 impl RpcService for Service {
-    async fn key(self, _: context::Context) -> String {
+    async fn key(self, _: context::Context) -> RpcResults {
         let binding = self.node.lock().await;
         let crypto = binding.crypto.lock().await;
 
-        crypto.public_key_as_string().unwrap()
+        crypto.results(if let Ok(k) = crypto.public_key_as_string() {
+            RpcResult::Key(k)
+        } else {
+            RpcResult::Bad
+        })
     }
 
     // pings are not IDENTIFICATION. we're just seeing if we speak the same language
-    async fn ping(self, _: context::Context, args: RpcArgs) -> bool {
-        debug!("ping called!");
-        args.0.op == RpcOp::Ping
+    async fn ping(self, _: context::Context) -> RpcResults {
+        let binding = self.node.lock().await;
+        let crypto = binding.crypto.lock().await;
+
+        crypto.results(RpcResult::Ping)
     }
 
-    // async fn find_node(self, _: context::Context, args: RpcArgs, id: Hash) -> Vec<SinglePeer> {
-    //     if self.verify(args, |arg: RpcArgs| {
-    //         block_on()
-    //     }) {
+    async fn find_node(self, _: context::Context, args: RpcArgs, id: Hash) -> RpcResults {
+        if let Err(r) = self.verify(&args).await {
+            return r;
+        }
 
-    //     }
-    // }
+        let binding = self.node.lock().await;
+        let crypto = binding.crypto.lock().await;
+
+        let bkt = RoutingTable::find_bucket(binding.table.as_ref().unwrap().clone(), id);
+
+        crypto.results(RpcResult::FindNode(bkt))
+    }
 }
 
 #[async_trait]
@@ -95,7 +103,6 @@ pub(crate) trait Network {
     async fn serve(node: KadNodeRef) -> JoinHandle<Result<(), ()>> {
         tokio::spawn(async move {
             let addr;
-
             {
                 let n = node.lock().await;
                 addr = n.addr;
@@ -179,68 +186,66 @@ impl Network for KadNetwork {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{node::Kad, util::Peer};
+    use crate::{
+        node::{Kad, KadNode, ResponsiveMockPinger},
+        routing::{RoutingTable, BUCKET_SIZE, KEY_SIZE},
+        util::{generate_peer, Hash, Peer},
+    };
     use tracing_test::traced_test;
 
-    #[test]
     #[traced_test]
-    fn serve() {
-        let kad = Kad::new(16161, false, true);
-        let handle = kad.serve();
-
-        handle.abort();
-    }
-
     #[test]
-    #[traced_test]
-    fn ping() {
+    fn find_node() {
         let (kad1, kad2) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
         let (handle1, handle2) = (kad1.clone().serve(), kad2.clone().serve());
 
-        let peer1;
-        let addr1;
-        {
-            let kad = kad1.clone();
-            let lock = kad.node.blocking_lock();
-            let lock2 = lock.table.as_ref().unwrap().blocking_lock();
+        let to_find = Hash::from(1);
 
-            addr1 = lock.addr;
+        let addr1 = kad1.clone().addr();
+        let peer1 = Peer::new(kad1.clone().id(), addr1);
 
-            peer1 = Peer {
-                id: lock2.id,
-                addresses: vec![(lock.addr, 0)],
-            };
-        }
+        let addr2 = kad2.clone().addr();
+        let peer2 = Peer::new(kad2.clone().id(), addr2);
 
-        let peer2;
-        let addr2;
+        let table;
         {
             let kad = kad2.clone();
-            let lock = kad.node.blocking_lock();
-            let lock2 = lock.table.as_ref().unwrap().blocking_lock();
-
-            addr2 = lock.addr;
-
-            peer2 = Peer {
-                id: lock2.id,
-                addresses: vec![(lock.addr, 0)],
-            };
+            let binding = kad.node.blocking_lock();
+            table = binding.table.as_ref().unwrap().clone();
         }
 
-        {
-            let kad = kad1.clone();
-            let res = kad.ping(peer2.clone()).unwrap();
+        let temp = Hash::from(1) << (KEY_SIZE - 1);
 
-            assert_eq!(res.id, peer2.id);
-            assert_eq!(res.addr, addr2);
+        {
+            let mut lock = table.blocking_lock();
+            lock.id = temp;
         }
 
-        {
-            let kad = kad2.clone();
-            let res = kad.ping(peer1.clone()).unwrap();
+        for i in 0..BUCKET_SIZE {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(Hash::from(i))),
+            );
+        }
 
-            assert_eq!(res.id, peer1.id);
-            assert_eq!(res.addr, addr1);
+        RoutingTable::update::<ResponsiveMockPinger>(
+            table.clone(),
+            generate_peer(Some(Hash::from(3) << (KEY_SIZE - 2))),
+        );
+
+        {
+            let reference;
+            {
+                let kad = kad2.clone();
+                let binding = kad.node.blocking_lock();
+                let table = binding.table.as_ref().unwrap().clone();
+                reference = RoutingTable::find_bucket(table, to_find);
+            }
+
+            let res = KadNode::find_node(kad1.node.clone(), peer2.clone(), to_find).unwrap();
+
+            assert!(!res.is_empty());
+            assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
         }
 
         handle1.abort();

@@ -1,18 +1,24 @@
 use crate::{
-    node::{Pinger, WeakNodeRef},
+    node::{KadNodeRef, Pinger, WeakNodeRef},
     util::{timestamp, Hash, Peer, SinglePeer},
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-pub(crate) const KEY_SIZE: usize = 64;
+#[cfg(test)]
 pub(crate) const BUCKET_SIZE: usize = 3;
+#[cfg(not(test))]
+pub(crate) const BUCKET_SIZE: usize = 20;
+pub(crate) const KEY_SIZE: usize = 64;
 pub(crate) const ADDRESS_LIMIT: usize = 5;
 pub(crate) const MISSED_PINGS_ALLOWED: usize = 3;
 pub(crate) const MISSED_MESSAGES_ALLOWED: usize = 3;
 pub(crate) const CACHE_SIZE: usize = 3;
 pub(crate) const ALPHA: usize = 3;
+
+// the prefix trie model is used in this implementation.
+// this may be changed in the future.
 
 pub(crate) struct Bucket {
     pub(crate) last_seen: u64,
@@ -202,6 +208,23 @@ impl RoutingTable {
         }
     }
 
+    pub(crate) fn find_bucket(table: TableRef, id: Hash) -> Vec<SinglePeer> {
+        let lock = table.blocking_lock();
+        let root = lock.root.as_ref().unwrap();
+
+        if let Some(trie) = Self::traverse(Some(root.clone()), id, 0) {
+            let lock = trie.blocking_lock();
+
+            if let Some(bucket) = &lock.bucket {
+                bucket.peers.clone().iter().map(Peer::single_peer).collect()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    }
+
     pub(crate) fn update<P: Pinger>(table: TableRef, peer: Peer) {
         let n;
         {
@@ -216,20 +239,41 @@ impl RoutingTable {
         Self::update_trie::<P>(table.clone(), &mut trie, peer);
     }
 
-    fn responded(trie: &mut Trie, peer: &SinglePeer) {
+    fn responded(node: KadNodeRef, trie: &mut Trie, peer: &SinglePeer) {
         if let Some(bkt) = &mut trie.bucket {
             if let Some(bkt_idx) = bkt.peers.iter().position(|x| x.id == peer.id) {
-                let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
+                if let Some(addr_idx) = bkt
+                    .peers
+                    .get(bkt_idx)
+                    .unwrap()
+                    .addresses
+                    .iter()
+                    .position(|x| x.0 == peer.addr)
+                {
+                    let addr_entry = bkt
+                        .peers
+                        .get(bkt_idx)
+                        .unwrap()
+                        .addresses
+                        .get(addr_idx)
+                        .unwrap();
 
-                if let Some(addr_idx) = bkt_entry.addresses.iter().position(|x| x.0 == peer.addr) {
-                    let addr_entry = bkt_entry.addresses.get_mut(addr_idx).unwrap();
+                    let staleness = addr_entry.1;
 
-                    if addr_entry.1 < MISSED_PINGS_ALLOWED {
-                        if addr_entry.1 > 0 {
-                            addr_entry.1 -= 1;
+                    if staleness < MISSED_PINGS_ALLOWED {
+                        if staleness > 0 {
+                            bkt.peers
+                                .get_mut(bkt_idx)
+                                .unwrap()
+                                .addresses
+                                .get_mut(addr_idx)
+                                .unwrap()
+                                .1 -= 1;
                         }
 
                         {
+                            let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
+
                             let t = bkt_entry.addresses.remove(addr_idx);
                             bkt_entry.addresses.push(t);
                         }
@@ -246,15 +290,49 @@ impl RoutingTable {
                             addr_entry.0 .0, addr_entry.0 .1, peer.id
                         );
 
-                        bkt_entry.addresses.remove(addr_idx);
-                    }
-                } else if bkt_entry.addresses.len() < ADDRESS_LIMIT {
-                    debug!(
-                        "new address {}:{} for existing node {:#x}",
-                        peer.id, peer.addr.0, peer.addr.1
-                    );
+                        {
+                            let addrs: &mut Vec<(_, usize)> =
+                                bkt.peers.get_mut(bkt_idx).unwrap().addresses.as_mut();
 
-                    bkt_entry.addresses.push((peer.addr, 0));
+                            addrs.remove(addr_idx);
+
+                            if addrs.is_empty() {
+                                if let Some(replacement) = bkt.cache.pop() {
+                                    debug!(
+                                        "adding {:#x} from cache to bucket and removing {:#x}",
+                                        replacement.id, peer.id
+                                    );
+
+                                    bkt.peers.push(replacement);
+                                } else {
+                                    debug!("nothing in cache, erasing node {:#x}", peer.id);
+                                }
+
+                                bkt.peers.remove(bkt_idx);
+
+                                // remove peer from keyring
+                                {
+                                    let binding = node.blocking_lock();
+                                    let mut crypto = binding.crypto.blocking_lock();
+
+                                    crypto.remove(peer.id);
+                                }
+                            } else {
+                                debug!("node {:#x} still has addresses in entry", peer.id);
+                            }
+                        }
+                    }
+                } else {
+                    let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
+
+                    if bkt_entry.addresses.len() < ADDRESS_LIMIT {
+                        debug!(
+                            "new address {}:{} for existing node {:#x}",
+                            peer.id, peer.addr.0, peer.addr.1
+                        );
+
+                        bkt_entry.addresses.push((peer.addr, 0));
+                    }
                 }
             }
 
@@ -262,39 +340,67 @@ impl RoutingTable {
         }
     }
 
-    fn stale(trie: &mut Trie, peer: &SinglePeer, to_add: Peer) {
+    fn stale(node: KadNodeRef, trie: &mut Trie, peer: &SinglePeer, to_add: Peer) {
         if let Some(bkt) = &mut trie.bucket {
             if let Some(bkt_idx) = bkt.peers.iter().position(|x| x.id == peer.id) {
-                let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
+                if let Some(addr_idx) = bkt
+                    .peers
+                    .get(bkt_idx)
+                    .unwrap()
+                    .addresses
+                    .iter()
+                    .position(|x| x.0 == peer.addr)
+                {
+                    let addr_entry = bkt
+                        .peers
+                        .get(bkt_idx)
+                        .unwrap()
+                        .addresses
+                        .get(addr_idx)
+                        .unwrap();
 
-                if let Some(addr_idx) = bkt_entry.addresses.iter().position(|x| x.0 == peer.addr) {
-                    let addr_entry = bkt_entry.addresses.get_mut(addr_idx).unwrap();
+                    if addr_entry.1 < MISSED_PINGS_ALLOWED {
+                        bkt.peers
+                            .get_mut(bkt_idx)
+                            .unwrap()
+                            .addresses
+                            .get_mut(addr_idx)
+                            .unwrap()
+                            .1 += 1;
+                    } else {
+                        {
+                            let addrs: &mut Vec<(_, usize)> =
+                                bkt.peers.get_mut(bkt_idx).unwrap().addresses.as_mut();
 
-                    addr_entry.1 += 1;
+                            addrs.remove(addr_idx);
 
-                    if addr_entry.1 > MISSED_PINGS_ALLOWED {
-                        bkt_entry.addresses.remove(addr_idx);
+                            if addrs.is_empty() {
+                                if let Some(replacement) = bkt.cache.pop() {
+                                    debug!(
+                                        "adding {:#x} from cache to bucket and removing {:#x}",
+                                        replacement.id, peer.id
+                                    );
 
-                        if bkt_entry.addresses.is_empty() {
-                            if let Some(replacement) = bkt.cache.pop() {
-                                debug!(
-                                    "adding {:#x} from cache to bucket and removing {:#x}",
-                                    replacement.id, bkt_entry.id
-                                );
+                                    bkt.peers.push(replacement);
+                                    bkt.update_cached_peer(to_add);
+                                } else {
+                                    debug!(
+                                        "nothing in cache, erasing node {:#x} and adding peer {:#x}",
+                                        peer.id, to_add.id
+                                    );
+                                    bkt.peers.push(to_add);
+                                }
 
-                                bkt.peers.push(replacement);
-                                bkt.update_cached_peer(to_add);
-                            } else {
-                                debug!(
-                                    "nothing in cache, erasing node {:#x} and adding peer {:#x}",
-                                    bkt_entry.id, to_add.id
-                                );
-                                bkt.peers.push(to_add);
+                                bkt.peers.remove(bkt_idx);
+
+                                // remove peer from keyring
+                                {
+                                    let binding = node.blocking_lock();
+                                    let mut crypto = binding.crypto.blocking_lock();
+
+                                    crypto.remove(peer.id);
+                                }
                             }
-
-                            bkt.peers.remove(bkt_idx);
-                        } else {
-                            debug!("node {:#x} still has addresses in entry", bkt_entry.id);
                         }
                     }
                 }
@@ -332,14 +438,14 @@ impl RoutingTable {
 
                     let node = table.node.upgrade().unwrap();
 
-                    match P::ping_peer(node, front) {
+                    match P::ping_peer(node.clone(), front) {
                         Ok(resp) => {
                             debug!("responded, updating");
-                            Self::responded(trie, &resp);
+                            Self::responded(node, trie, &resp);
                         }
                         Err(unresp) => {
                             debug!("did not respond, making stale");
-                            Self::stale(trie, &unresp, peer);
+                            Self::stale(node, trie, &unresp, peer);
                         }
                     }
                 }
@@ -358,29 +464,13 @@ impl RoutingTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::node::{Kad, KadNode, RealPinger, ResponsiveMockPinger, UnresponsiveMockPinger};
+    use crate::{
+        node::{Kad, ResponsiveMockPinger, UnresponsiveMockPinger},
+        util::generate_peer,
+    };
 
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
     use tracing_test::traced_test;
-
-    fn generate_peer(pid: Option<Hash>) -> Peer {
-        Peer {
-            id: if let Some(pid_) = pid {
-                pid_
-            } else {
-                let i = (0..32u8).map(|_| rand::random::<u8>()).collect::<Vec<_>>();
-                Hash::from(&i[..])
-            },
-            addresses: vec![(
-                (
-                    IpAddr::V4("127.0.0.1".parse::<Ipv4Addr>().unwrap()),
-                    rand::random(),
-                ),
-                0,
-            )],
-        }
-    }
 
     #[traced_test]
     #[test]

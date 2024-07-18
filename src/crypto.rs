@@ -1,5 +1,8 @@
-use crate::util::{timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp};
-use rsa::pkcs1::{self, DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
+use crate::util::{timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp, RpcResult, RpcResults};
+use futures::Future;
+use rsa::pkcs1::{
+    self, DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
+};
 use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::sha2::Sha256;
@@ -17,7 +20,7 @@ pub(crate) struct Crypto {
     pub(crate) signing: SigningKey<Sha256>,
 
     // hash -> (key, last contacted (for pruning))
-    pub(crate) keystore: BTreeMap<Hash, (RsaPublicKey, u64)>,
+    pub(crate) keyring: BTreeMap<Hash, (RsaPublicKey, u64)>,
 }
 
 impl Crypto {
@@ -31,7 +34,7 @@ impl Crypto {
             private: private_key.clone(),
             public: public_key,
             signing: SigningKey::<Sha256>::new(private_key),
-            keystore: BTreeMap::new(),
+            keyring: BTreeMap::new(),
         })
     }
 
@@ -46,7 +49,7 @@ impl Crypto {
             private: private_key.clone(),
             public: public_key,
             signing: SigningKey::<Sha256>::new(private_key),
-            keystore: BTreeMap::new(),
+            keyring: BTreeMap::new(),
         })
     }
 
@@ -71,10 +74,9 @@ impl Crypto {
     }
 
     // verify with existing key
-    pub(crate) fn verify(&mut self, id: Hash, data: &str, sig: &str) -> bool {
-        let entry = self.keystore.get_mut(&id).unwrap();
+    pub(crate) fn verify(&self, id: Hash, data: &str, sig: &str) -> bool {
+        let entry = self.keyring.get(&id).unwrap();
         let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
-        entry.1 = timestamp();
 
         match Signature::try_from(sig.as_bytes()) {
             Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
@@ -93,5 +95,66 @@ impl Crypto {
         let sign = self.sign(serde_json::to_string(&ctx).unwrap().as_str());
 
         (ctx, sign)
+    }
+
+    pub(crate) fn results(&self, res: RpcResult) -> RpcResults {
+        let sign = self.sign(serde_json::to_string(&res).unwrap().as_str());
+
+        (res, sign)
+    }
+
+    // add/update key to keyring
+    pub(crate) fn entry(&mut self, id: Hash, key: &str) -> bool {
+        if let Ok(pub_key) = RsaPublicKey::from_pkcs1_pem(key) {
+            self.keyring.insert(id, (pub_key, timestamp()));
+            true
+        } else {
+            false
+        }
+    }
+
+    // remove from keyring
+    pub(crate) fn remove(&mut self, id: Hash) {
+        self.keyring.remove(&id);
+    }
+
+    pub(crate) async fn verify_args<F>(&self, args: &RpcArgs, backup: impl FnOnce() -> F) -> bool
+    where
+        F: Future<Output = ()>,
+    {
+        let ctx = args.0.clone();
+
+        if self.keyring.contains_key(&ctx.id) {
+            self.verify(
+                args.0.id,
+                serde_json::to_string(&ctx).unwrap().as_str(),
+                &args.1,
+            )
+        } else {
+            // if key doesn't exist, try and get it. if it still doesn't exist, give up.
+            backup().await;
+
+            if self.keyring.contains_key(&ctx.id) {
+                self.verify(
+                    args.0.id,
+                    serde_json::to_string(&ctx).unwrap().as_str(),
+                    &args.1,
+                )
+            } else {
+                false
+            }
+        }
+    }
+
+    pub(crate) fn verify_results(&self, id: Hash, results: &RpcResults) -> bool {
+        if self.keyring.contains_key(&id) {
+            self.verify(
+                id,
+                serde_json::to_string(&results.0).unwrap().as_str(),
+                &results.1,
+            )
+        } else {
+            false
+        }
     }
 }
