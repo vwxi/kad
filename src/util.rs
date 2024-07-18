@@ -26,7 +26,7 @@ pub(crate) fn timestamp() -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum RpcOp {
     Ping,
     FindNode(Hash),

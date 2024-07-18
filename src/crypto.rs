@@ -1,4 +1,4 @@
-use crate::util::{Addr, Hash, RpcArgs, RpcContext, RpcOp, timestamp};
+use crate::util::{timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp};
 use rsa::pkcs1::{self, DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
-const KEY_BITS: usize = 2048;
+pub(crate) const KEY_BITS: usize = 2048;
 
 pub(crate) struct Crypto {
     pub(crate) private: RsaPrivateKey,
@@ -70,18 +70,15 @@ impl Crypto {
             .to_string()
     }
 
+    // verify with existing key
     pub(crate) fn verify(&mut self, id: Hash, data: &str, sig: &str) -> bool {
-        if self.keystore.contains_key(&id) {
-            let entry = self.keystore.get_mut(&id).unwrap();
-            let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
-            entry.1 = timestamp();
+        let entry = self.keystore.get_mut(&id).unwrap();
+        let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
+        entry.1 = timestamp();
 
-            match Signature::try_from(sig.as_bytes()) {
-                Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
-                Err(_) => false,
-            }
-        } else {
-            false
+        match Signature::try_from(sig.as_bytes()) {
+            Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
+            Err(_) => false,
         }
     }
 

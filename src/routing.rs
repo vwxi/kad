@@ -1,15 +1,18 @@
-use crate::{node::{Node, NodeRef, WeakNodeRef, Pinger}, rpc::Network, util::{timestamp, Hash, Peer, RpcOp, SinglePeer}};
-use tokio::sync::Mutex;
+use crate::{
+    node::{Pinger, WeakNodeRef},
+    util::{timestamp, Hash, Peer, SinglePeer},
+};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::debug;
 
-const KEY_SIZE: usize = 64;
-const BUCKET_SIZE: usize = 3;
-const ADDRESS_LIMIT: usize = 5;
-const MISSED_PINGS_ALLOWED: usize = 3;
-const MISSED_MESSAGES_ALLOWED: usize = 3;
-const CACHE_SIZE: usize = 3;
-const ALPHA: usize = 3;
+pub(crate) const KEY_SIZE: usize = 64;
+pub(crate) const BUCKET_SIZE: usize = 3;
+pub(crate) const ADDRESS_LIMIT: usize = 5;
+pub(crate) const MISSED_PINGS_ALLOWED: usize = 3;
+pub(crate) const MISSED_MESSAGES_ALLOWED: usize = 3;
+pub(crate) const CACHE_SIZE: usize = 3;
+pub(crate) const ALPHA: usize = 3;
 
 pub(crate) struct Bucket {
     pub(crate) last_seen: u64,
@@ -282,7 +285,10 @@ impl RoutingTable {
                                 bkt.peers.push(replacement);
                                 bkt.update_cached_peer(to_add);
                             } else {
-                                debug!("nothing in cache, erasing node {:#x} and adding peer {:#x}", bkt_entry.id, to_add.id);
+                                debug!(
+                                    "nothing in cache, erasing node {:#x} and adding peer {:#x}",
+                                    bkt_entry.id, to_add.id
+                                );
                                 bkt.peers.push(to_add);
                             }
 
@@ -352,7 +358,7 @@ impl RoutingTable {
 
 #[cfg(test)]
 mod tests {
-    use crate::node::{Node, RealPinger, ResponsiveMockPinger, UnresponsiveMockPinger};
+    use crate::node::{Kad, KadNode, RealPinger, ResponsiveMockPinger, UnresponsiveMockPinger};
 
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
@@ -379,19 +385,21 @@ mod tests {
     #[traced_test]
     #[test]
     fn add_single_peer() {
-        if let Ok(node) = Node::new(16161, false, true) {
-            let mut binding = node.blocking_lock();
-            let table = binding.table.as_ref().unwrap().clone();
-            let pinger = RealPinger::default();
-            
-            RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(None));
+        let kad = Kad::new(16161, false, true);
 
-            let inner = table.blocking_lock();
-            let root = inner.root.as_ref().unwrap().blocking_lock();
-            let bkt = root.bucket.as_ref().unwrap();
-
-            assert_eq!(bkt.peers.len(), 1);
+        let table;
+        {
+            let binding = kad.node.blocking_lock();
+            table = binding.table.as_ref().unwrap().clone();
         }
+
+        RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(None));
+
+        let inner = table.blocking_lock();
+        let root = inner.root.as_ref().unwrap().blocking_lock();
+        let bkt = root.bucket.as_ref().unwrap();
+
+        assert_eq!(bkt.peers.len(), 1);
     }
 
     fn validate_tree(t: &Trie) {
@@ -436,75 +444,78 @@ mod tests {
     #[traced_test]
     #[test]
     fn split() {
-        if let Ok(node) = Node::new(16161, false, true) {
-            let table;
-            {
-                let binding = node.blocking_lock();
-                table = binding.table.as_ref().unwrap().clone();
-            }
+        let kad = Kad::new(16161, false, true);
 
-            let temp = Hash::from(1) << (KEY_SIZE - 1);
+        let table;
+        {
+            let binding = kad.node.blocking_lock();
+            table = binding.table.as_ref().unwrap().clone();
+        }
 
-            {
-                let mut lock = table.blocking_lock();
-                lock.id = temp;
-            }
+        let temp = Hash::from(1) << (KEY_SIZE - 1);
 
-            for i in 0..BUCKET_SIZE {
-                RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
-            }
+        {
+            let mut lock = table.blocking_lock();
+            lock.id = temp;
+        }
 
+        for i in 0..BUCKET_SIZE {
             RoutingTable::update::<ResponsiveMockPinger>(
                 table.clone(),
-                generate_peer(Some(Hash::from(3) << (KEY_SIZE - 2))),
+                generate_peer(Some(Hash::from(i))),
             );
+        }
+
+        RoutingTable::update::<ResponsiveMockPinger>(
+            table.clone(),
+            generate_peer(Some(Hash::from(3) << (KEY_SIZE - 2))),
+        );
+
+        {
+            let inner = table.blocking_lock();
+            let root = inner.root.as_ref().unwrap().blocking_lock();
+
+            validate_tree(&root);
 
             {
-                let inner = table.blocking_lock();
-                let root = inner.root.as_ref().unwrap().blocking_lock();
-
-                validate_tree(&root);
-
-                {
-                    let b = root.left.as_ref().unwrap();
-                    let left = b.blocking_lock();
-                    assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
-                }
-
-                {
-                    let b = root.right.as_ref().unwrap();
-                    let right = b.blocking_lock();
-                    assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
-                }
-            }
-
-            for i in 0..BUCKET_SIZE {
-                RoutingTable::update::<ResponsiveMockPinger>(
-                    table.clone(),
-                    generate_peer(Some(temp | Hash::from(i))),
-                );
+                let b = root.left.as_ref().unwrap();
+                let left = b.blocking_lock();
+                assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
             }
 
             {
-                let inner = table.blocking_lock();
-                let root = inner.root.as_ref().unwrap().blocking_lock();
+                let b = root.right.as_ref().unwrap();
+                let right = b.blocking_lock();
+                assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
+            }
+        }
 
-                let r = root.right.as_ref().unwrap().clone();
-                let lock = r.blocking_lock();
+        for i in 0..BUCKET_SIZE {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(temp | Hash::from(i))),
+            );
+        }
 
-                validate_tree(&lock);
+        {
+            let inner = table.blocking_lock();
+            let root = inner.root.as_ref().unwrap().blocking_lock();
 
-                {
-                    let b = lock.left.as_ref().unwrap();
-                    let left = b.blocking_lock();
-                    assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
-                }
+            let r = root.right.as_ref().unwrap().clone();
+            let lock = r.blocking_lock();
 
-                {
-                    let b = lock.right.as_ref().unwrap();
-                    let right = b.blocking_lock();
-                    assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
-                }
+            validate_tree(&lock);
+
+            {
+                let b = lock.left.as_ref().unwrap();
+                let left = b.blocking_lock();
+                assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
+            }
+
+            {
+                let b = lock.right.as_ref().unwrap();
+                let right = b.blocking_lock();
+                assert_eq!(right.bucket.as_ref().unwrap().peers.len(), 1);
             }
         }
     }
@@ -512,100 +523,106 @@ mod tests {
     #[traced_test]
     #[test]
     fn far_responsive() {
-        if let Ok(node) = Node::new(16161, false, true) {
-            let table;
-            {
-                let binding = node.blocking_lock();
-                table = binding.table.as_ref().unwrap().clone();
-            }
+        let kad = Kad::new(16161, false, true);
 
-            let temp = Hash::from(1) << (KEY_SIZE - 1);
+        let table;
+        {
+            let binding = kad.node.blocking_lock();
+            table = binding.table.as_ref().unwrap().clone();
+        }
 
-            {
-                let mut lock = table.blocking_lock();
-                lock.id = temp;
-            }
+        let temp = Hash::from(1) << (KEY_SIZE - 1);
 
-            for i in 0..BUCKET_SIZE {
-                RoutingTable::update::<ResponsiveMockPinger>(
-                    table.clone(),
-                    generate_peer(Some(temp | Hash::from(i))),
-                );
-            }
+        {
+            let mut lock = table.blocking_lock();
+            lock.id = temp;
+        }
 
-            // insert far nodes
-            for i in 0..(BUCKET_SIZE) {
-                RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
-            }
+        for i in 0..BUCKET_SIZE {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(temp | Hash::from(i))),
+            );
+        }
 
-            for i in 2..(BUCKET_SIZE + 2) {
-                RoutingTable::update::<ResponsiveMockPinger>(
-                    table.clone(),
-                    generate_peer(Some(Hash::from(70 | i))),
-                );
-            }
+        // insert far nodes
+        for i in 0..(BUCKET_SIZE) {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(Hash::from(i))),
+            );
+        }
 
-            {
-                let lock = table.blocking_lock();
-                let root = lock.root.as_ref().unwrap().blocking_lock();
-                let left = root.left.as_ref().unwrap().blocking_lock();
+        for i in 2..(BUCKET_SIZE + 2) {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(Hash::from(70 | i))),
+            );
+        }
 
-                assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
-            }
+        {
+            let lock = table.blocking_lock();
+            let root = lock.root.as_ref().unwrap().blocking_lock();
+            let left = root.left.as_ref().unwrap().blocking_lock();
+
+            assert_eq!(left.bucket.as_ref().unwrap().peers.len(), BUCKET_SIZE);
         }
     }
 
     #[traced_test]
     #[test]
     fn far_unresponsive() {
-        if let Ok(node) = Node::new(16161, false, true) {
-            let table;
-            {
-                let binding = node.blocking_lock();
-                table = binding.table.as_ref().unwrap().clone();
-            }
+        let kad = Kad::new(16161, false, true);
 
-            let temp = Hash::from(1) << (KEY_SIZE - 1);
-
-            {
-                let mut lock = table.blocking_lock();
-                lock.id = temp;
-            }
-
-            for i in 0..BUCKET_SIZE {
-                RoutingTable::update::<ResponsiveMockPinger>(
-                    table.clone(),
-                    generate_peer(Some(temp | Hash::from(i))),
-                );
-            }
-
-            let to_stale = generate_peer(Some(Hash::from(1)));
-
-            RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
-
-            // insert far nodes
-            for i in 2..(BUCKET_SIZE + 1) {
-                RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), generate_peer(Some(Hash::from(i))));
-            }
-
-            // fill replacement cache
-            for i in 0..(CACHE_SIZE + 1) {
-                RoutingTable::update::<UnresponsiveMockPinger>(
-                    table.clone(),
-                    generate_peer(Some(Hash::from(70 | i))),
-                );
-            }
-
-            // should become max staleness
-            for _ in 0..=(MISSED_PINGS_ALLOWED + 1) {
-                RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
-            }
-
-            let stale = RoutingTable::find(table.clone(), to_stale.id);
-            let added = RoutingTable::find(table.clone(), Hash::from(70 | CACHE_SIZE));
-
-            assert!(stale.is_none());
-            assert!(added.is_some());
+        let table;
+        {
+            let binding = kad.node.blocking_lock();
+            table = binding.table.as_ref().unwrap().clone();
         }
+
+        let temp = Hash::from(1) << (KEY_SIZE - 1);
+
+        {
+            let mut lock = table.blocking_lock();
+            lock.id = temp;
+        }
+
+        for i in 0..BUCKET_SIZE {
+            RoutingTable::update::<ResponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(temp | Hash::from(i))),
+            );
+        }
+
+        let to_stale = generate_peer(Some(Hash::from(1)));
+
+        RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
+
+        // insert far nodes
+        for i in 2..(BUCKET_SIZE + 1) {
+            RoutingTable::update::<UnresponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(Hash::from(i))),
+            );
+        }
+
+        // fill replacement cache
+        for i in 0..(CACHE_SIZE + 1) {
+            RoutingTable::update::<UnresponsiveMockPinger>(
+                table.clone(),
+                generate_peer(Some(Hash::from(70 | i))),
+            );
+        }
+
+        // should become max staleness
+        for _ in 0..=(MISSED_PINGS_ALLOWED + 1) {
+            RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone());
+        }
+
+        let stale = RoutingTable::find(table.clone(), to_stale.id);
+        let added = RoutingTable::find(table.clone(), Hash::from(70 | CACHE_SIZE));
+
+        assert!(stale.is_none());
+        assert!(added.is_some());
     }
 }

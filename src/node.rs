@@ -1,30 +1,66 @@
+use crate::{
+    crypto::Crypto,
+    routing::{RoutingTable, TableRef},
+    rpc::{KadNetwork, Network, TIMEOUT},
+    util::{timestamp, Addr, Hash, Peer, RpcOp, SinglePeer},
+};
 use bigint::U256;
-use futures::executor::block_on;
 use rsa::sha2::{Digest, Sha256};
-use tarpc::context;
-use crate::{crypto::Crypto, routing::{RoutingTable, TableRef}, rpc::{Network, RealNetwork, TIMEOUT}, util::{timestamp, Addr, Hash, Peer, RpcOp, SinglePeer}};
-use tokio::{sync::Mutex, time::timeout};
 use std::sync::{Arc, Weak};
 use std::{
     error::Error,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
 };
-use tokio::task;
+use tarpc::context;
+use tokio::{
+    runtime::{Handle, Runtime},
+    sync::Mutex,
+    task::JoinHandle,
+    time::timeout,
+};
 
-pub struct Node {
+pub(crate) struct KadNode {
     pub(crate) addr: Addr,
     pub(crate) crypto: Mutex<Crypto>,
     pub(crate) table: Option<TableRef>,
-    pub(crate) network: RealNetwork,
+    pub(crate) kad: Weak<Kad>,
 }
 
-pub type NodeRef = Arc<Mutex<Node>>;
-pub(crate) type WeakNodeRef = Weak<Mutex<Node>>;
+pub struct Kad {
+    pub(crate) node: KadNodeRef,
+    pub(crate) runtime: Runtime,
+}
 
-impl Node {
+pub(crate) type KadNodeRef = Arc<Mutex<KadNode>>;
+pub(crate) type WeakNodeRef = Weak<Mutex<KadNode>>;
+
+impl Kad {
+    pub fn new(port: u16, ipv6: bool, local: bool) -> Arc<Self> {
+        Arc::new_cyclic(|gadget| Kad {
+            node: KadNode::new(port, ipv6, local, gadget.clone())
+                .expect("could not create KadNode object"),
+            runtime: Runtime::new().expect("could not create runtime for Kad object"),
+        })
+    }
+
+    pub fn serve(self: Arc<Self>) -> JoinHandle<Result<(), ()>> {
+        KadNode::serve(self.runtime.handle(), self.node.clone())
+    }
+
+    pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+        KadNode::ping(self.node.clone(), peer)
+    }
+}
+
+impl KadNode {
     // TODO: implement non-local forwarding of some sort
-    pub fn new(port: u16, ipv6: bool, local: bool) -> Result<NodeRef, Box<dyn Error>> {
+    pub(crate) fn new(
+        port: u16,
+        ipv6: bool,
+        local: bool,
+        k: Weak<Kad>,
+    ) -> Result<KadNodeRef, Box<dyn Error>> {
         let a = (
             if ipv6 {
                 if local {
@@ -47,40 +83,39 @@ impl Node {
 
         let id = Hash::from_little_endian(hasher.finalize().as_mut_slice());
 
-        let node = Arc::new(Mutex::new(Node {
-            addr: a,
-            table: None,
-            crypto: Mutex::new(c),
-            network: RealNetwork::default(),
-        }));
-
-        {
-            let mut lock = node.blocking_lock();
-            lock.table = Some(RoutingTable::new(id, Arc::downgrade(&node)));
-        }
+        let node = Arc::new_cyclic(|gadget| {
+            Mutex::new(KadNode {
+                addr: a,
+                table: Some(RoutingTable::new(id, gadget.clone())),
+                crypto: Mutex::new(c),
+                kad: k,
+            })
+        });
 
         Ok(node)
     }
 
-    pub fn serve(node: NodeRef) -> task::JoinHandle<()> {
-        task::spawn(async move {
-            let lock = node.lock().await;
-            let _ = lock.network.serve(node.clone()).await;
-        })
+    pub(crate) fn serve(handle: &Handle, node: KadNodeRef) -> JoinHandle<Result<(), ()>> {
+        handle.block_on(KadNetwork::serve(node))
     }
 
-    pub(crate) fn ping(node: NodeRef, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+    // pub(crate) fn get_key(node: KadNodeRef, peer: Peer) -> bool {
+
+    // }
+
+    pub(crate) fn ping(node: KadNodeRef, peer: Peer) -> Result<SinglePeer, SinglePeer> {
         let lock = node.blocking_lock();
+        let kad = lock.kad.upgrade().unwrap();
 
         let nothing = SinglePeer {
             id: U256::from(0),
-            addr: (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+            addr: (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         };
-        
+
         if peer.addresses.is_empty() {
             return Err(nothing);
         }
-        
+
         let args;
         {
             let table = lock.table.as_ref().unwrap().blocking_lock();
@@ -88,16 +123,24 @@ impl Node {
             args = crypto.args(table.id, RpcOp::Ping, lock.addr, timestamp());
         }
 
-        block_on(async {
-            match lock.network.connect_peer(peer).await {
+        let handle = kad.runtime.handle();
+
+        handle.block_on(async {
+            match KadNetwork::connect_peer(peer).await {
                 Ok((conn, responding_peer)) => {
-                    if timeout(Duration::from_secs(TIMEOUT), conn.ping(context::current(), args)).await.is_ok() {
+                    if timeout(
+                        Duration::from_secs(TIMEOUT),
+                        conn.ping(context::current(), args),
+                    )
+                    .await
+                    .is_ok()
+                    {
                         Ok(responding_peer)
                     } else {
                         Err(responding_peer)
                     }
-                },
-                Err(single_peer) => Err(single_peer)
+                }
+                Err(single_peer) => Err(single_peer),
             }
         })
     }
@@ -105,8 +148,8 @@ impl Node {
 
 pub(crate) trait Pinger {
     // this function only exists to facilitate easier test mocking
-    fn ping_peer(node: NodeRef, peer: Peer) -> Result<SinglePeer, SinglePeer> {
-        Node::ping(node, peer)
+    fn ping_peer(node: KadNodeRef, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+        KadNode::ping(node, peer)
     }
 }
 
@@ -117,10 +160,10 @@ impl Pinger for RealPinger {}
 #[derive(Default)]
 pub(crate) struct ResponsiveMockPinger {}
 impl Pinger for ResponsiveMockPinger {
-    fn ping_peer(_: NodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(_: KadNodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
         Ok(SinglePeer {
             id: p.id,
-            addr: p.addresses.first().unwrap().0
+            addr: p.addresses.first().unwrap().0,
         })
     }
 }
@@ -128,10 +171,10 @@ impl Pinger for ResponsiveMockPinger {
 #[derive(Default)]
 pub(crate) struct UnresponsiveMockPinger {}
 impl Pinger for UnresponsiveMockPinger {
-    fn ping_peer(_: NodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(_: KadNodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
         Err(SinglePeer {
             id: p.id,
-            addr: p.addresses.first().unwrap().0
+            addr: p.addresses.first().unwrap().0,
         })
     }
 }
