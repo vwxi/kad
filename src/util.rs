@@ -1,6 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr},
-    time::{SystemTime, UNIX_EPOCH},
+    net::{IpAddr, Ipv4Addr}, num::ParseIntError, time::{SystemTime, UNIX_EPOCH}
 };
 
 use bigint::uint::U256;
@@ -10,7 +9,7 @@ pub type Addr = (IpAddr, u16);
 pub type Hash = U256;
 
 // a peer object with multiple addresses
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct Peer {
     pub id: Hash,
     pub addresses: Vec<(Addr, usize)>,
@@ -70,16 +69,23 @@ pub(crate) fn timestamp() -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
+pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect()
+}
+
 #[cfg(test)]
-pub(crate) fn generate_peer(pid: Option<Hash>) -> Peer {
-    Peer {
+pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
+    SinglePeer {
         id: if let Some(pid_) = pid {
             pid_
         } else {
             let i = (0..32u8).map(|_| rand::random::<u8>()).collect::<Vec<_>>();
             Hash::from(&i[..])
         },
-        addresses: vec![((IpAddr::V4(Ipv4Addr::LOCALHOST), rand::random()), 0)],
+        addr: (IpAddr::V4(Ipv4Addr::LOCALHOST), rand::random()),
     }
 }
 

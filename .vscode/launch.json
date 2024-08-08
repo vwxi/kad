@@ -10,9 +10,7 @@
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=kad",
-                    "--",
-                    "--nocapture"
+                    "--package=kad"
                 ],
                 "filter": {
                     "name": "kad",

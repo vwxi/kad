@@ -1,7 +1,7 @@
 use crate::{
     crypto::Crypto,
     routing::{RoutingTable, TableRef},
-    rpc::{KadNetwork, Network, TIMEOUT},
+    rpc::{KadNetwork, Network},
     util::{timestamp, Addr, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use bigint::U256;
@@ -9,22 +9,19 @@ use rsa::sha2::{Digest, Sha256};
 use std::sync::{Arc, Weak};
 use std::{
     error::Error,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    time::Duration,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr}
 };
 use tarpc::context;
 use tokio::{
     runtime::{Handle, Runtime},
-    sync::{Mutex, MutexGuard},
-    task::JoinHandle,
-    time::timeout,
+    task::JoinHandle
 };
 use tracing::debug;
 
 pub(crate) struct KadNode {
     pub(crate) addr: Addr,
-    pub(crate) crypto: Mutex<Crypto>,
-    pub(crate) table: Option<TableRef>,
+    pub(crate) crypto: Crypto,
+    pub(crate) table: TableRef,
     pub(crate) kad: Weak<Kad>,
 }
 
@@ -33,8 +30,8 @@ pub struct Kad {
     pub(crate) runtime: Runtime,
 }
 
-pub(crate) type KadNodeRef = Arc<Mutex<KadNode>>;
-pub(crate) type WeakNodeRef = Weak<Mutex<KadNode>>;
+pub(crate) type KadNodeRef = Arc<KadNode>;
+pub(crate) type WeakNodeRef = Weak<KadNode>;
 
 impl Kad {
     pub fn new(port: u16, ipv6: bool, local: bool) -> Arc<Self> {
@@ -45,7 +42,7 @@ impl Kad {
         })
     }
 
-    pub fn serve(self: Arc<Self>) -> JoinHandle<Result<(), ()>> {
+    pub fn serve(self: Arc<Self>) -> JoinHandle<()> {
         KadNode::serve(self.runtime.handle(), self.node.clone())
     }
 
@@ -54,14 +51,11 @@ impl Kad {
     }
 
     pub fn addr(self: Arc<Self>) -> Addr {
-        let lock = self.node.blocking_lock();
-
-        lock.addr
+        self.node.addr
     }
 
     pub fn id(self: Arc<Self>) -> Hash {
-        let lock = self.node.blocking_lock();
-        let table = lock.table.as_ref().unwrap().blocking_lock();
+        let table = self.node.table.blocking_lock();
 
         table.id
     }
@@ -73,8 +67,7 @@ macro_rules! kad_fn {
         #[allow(clippy::redundant_closure_call)] // not too sure
         pub(crate) fn $func(node: KadNodeRef, peer: Peer) -> Result<$return_type, SinglePeer> {
             // hacky
-            let lock = node.blocking_lock();
-            let kad = lock.kad.upgrade().unwrap();
+            let kad = node.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
@@ -88,17 +81,16 @@ macro_rules! kad_fn {
             let handle = kad.runtime.handle();
 
             handle.block_on(async {
-                match KadNetwork::connect_peer(peer).await {
+                match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if let Ok(Ok(result)) = timeout(Duration::from_secs(TIMEOUT), conn.$func(context::current())).await {
-                            let f = |lock: MutexGuard<KadNode>, res: RpcResults, resp: SinglePeer| -> Result<$return_type, SinglePeer> {
-                                $closure(lock, res, resp)
-                            };
-
-                            f(lock, result, responding_peer)
-                        } else {
-                            debug!("{} operation timed out", stringify!($func));
-                            Err(responding_peer)
+                        match conn.client.$func(context::current()).await {
+                            Ok(res) => {
+                                $closure(node.clone(), res, responding_peer).await
+                            },
+                            Err(err) => {
+                                debug!("{} operation failed ({:?})", stringify!($func), err);
+                                Err(responding_peer)
+                            },
                         }
                     }
                     Err(single_peer) => Err(single_peer),
@@ -111,8 +103,7 @@ macro_rules! kad_fn {
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
         pub(crate) fn $func(node: KadNodeRef, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
-            let lock = node.blocking_lock();
-            let kad = lock.kad.upgrade().unwrap();
+            let kad = node.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
@@ -125,24 +116,41 @@ macro_rules! kad_fn {
 
             let args;
             {
-                let table = lock.table.as_ref().unwrap().blocking_lock();
-                let crypto = lock.crypto.blocking_lock();
-                args = crypto.args(table.id, $op($( $arg ),*), lock.addr, timestamp());
+                let table = node.table.blocking_lock();
+                args = node.crypto.args(table.id, $op($( $arg ),*), node.addr, timestamp());
             }
 
             let handle = kad.runtime.handle();
 
             handle.block_on(async {
-                match KadNetwork::connect_peer(peer).await {
+                match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if let Ok(Ok(result)) = timeout(Duration::from_secs(TIMEOUT), conn.$func(context::current(), args, $( $arg ),*)).await {
-                            let f = |lock: MutexGuard<KadNode>, res: RpcResults, resp: SinglePeer| -> Result<$return_type, SinglePeer> {
-                                $closure(lock, res, resp)
-                            };
-
-                            f(lock, result, responding_peer)
+                        if node.crypto.if_unknown(responding_peer.id, || async {
+                            if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
+                                let mut hasher = Sha256::new();
+                                hasher.update(key.as_bytes());
+                                let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
+                
+                                if key_hash == responding_peer.id {
+                                    node.crypto.entry(responding_peer.id, key.as_str()).await
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        }).await {
+                            match conn.client.$func(context::current(), args, $( $arg ),*).await {
+                                Ok(res) => {
+                                    $closure(node.clone(), res, responding_peer).await
+                                },
+                                Err(err) => {
+                                    debug!("{} operation failed ({:?})", stringify!($func), err);
+                                    Err(responding_peer)
+                                },
+                            }
                         } else {
-                            debug!("{} operation timed out", stringify!($func));
+                            debug!("could not acquire key");
                             Err(responding_peer)
                         }
                     }
@@ -183,19 +191,15 @@ impl KadNode {
 
         let id = Hash::from_little_endian(hasher.finalize().as_mut_slice());
 
-        let node = Arc::new_cyclic(|gadget| {
-            Mutex::new(KadNode {
-                addr: a,
-                table: Some(RoutingTable::new(id, gadget.clone())),
-                crypto: Mutex::new(c),
-                kad: k,
-            })
-        });
-
-        Ok(node)
+        Ok(Arc::new_cyclic(|gadget| KadNode {
+            addr: a,
+            table: RoutingTable::new(id, gadget.clone()),
+            crypto: c,
+            kad: k,
+        }))
     }
 
-    pub(crate) fn serve(handle: &Handle, node: KadNodeRef) -> JoinHandle<Result<(), ()>> {
+    pub(crate) fn serve(handle: &Handle, node: KadNodeRef) -> JoinHandle<()> {
         handle.block_on(KadNetwork::serve(node))
     }
 
@@ -205,17 +209,15 @@ impl KadNode {
         key,
         RpcOp::Key,
         SinglePeer,
-        |lock: MutexGuard<KadNode>, res: RpcResults, resp: SinglePeer| {
+        |node: KadNodeRef, res: RpcResults, resp: SinglePeer| async move {
             // check if hash(key) == id then add to keystore
             if let RpcResult::Key(result) = res.0 {
-                let mut crypto = lock.crypto.blocking_lock();
-
                 let mut hasher = Sha256::new();
                 hasher.update(result.as_bytes());
                 let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
 
                 if key_hash == resp.id {
-                    if crypto.entry(resp.id, result.as_str()) {
+                    if node.crypto.entry(resp.id, result.as_str()).await {
                         Ok(resp)
                     } else {
                         Err(resp)
@@ -233,7 +235,7 @@ impl KadNode {
         ping,
         RpcOp::Ping,
         SinglePeer,
-        |_, res: RpcResults, resp: SinglePeer| {
+        |_, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Ping = res.0 {
                 Ok(resp)
             } else {
@@ -248,12 +250,12 @@ impl KadNode {
         find_node,
         |id: Hash| RpcOp::FindNode(id),
         Vec<SinglePeer>,
-        |lock: MutexGuard<KadNode>, res: RpcResults, resp: SinglePeer| {
+        |node: KadNodeRef, res: RpcResults, resp: SinglePeer| async move {    
             // check if results are okay
-            let crypto = lock.crypto.blocking_lock();
-
             if let RpcResult::FindNode(peers) = res.0.clone() {
-                if crypto.verify_results(resp.id, &res) {
+                if node.crypto.verify_results(resp.id, &res).await {
+                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+
                     Ok(peers)
                 } else {
                     Err(resp)

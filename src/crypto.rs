@@ -1,4 +1,4 @@
-use crate::util::{timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp, RpcResult, RpcResults};
+use crate::util::{decode_hex, timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp, RpcResult, RpcResults};
 use futures::Future;
 use rsa::pkcs1::{
     self, DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
@@ -11,8 +11,10 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
+use tokio::sync::RwLock;
 
 pub(crate) const KEY_BITS: usize = 2048;
+pub(crate) const MAX_KEYS: usize = 64;
 
 pub(crate) struct Crypto {
     pub(crate) private: RsaPrivateKey,
@@ -20,7 +22,7 @@ pub(crate) struct Crypto {
     pub(crate) signing: SigningKey<Sha256>,
 
     // hash -> (key, last contacted (for pruning))
-    pub(crate) keyring: BTreeMap<Hash, (RsaPublicKey, u64)>,
+    pub(crate) keyring: RwLock<BTreeMap<Hash, (RsaPublicKey, u64)>>,
 }
 
 impl Crypto {
@@ -34,7 +36,7 @@ impl Crypto {
             private: private_key.clone(),
             public: public_key,
             signing: SigningKey::<Sha256>::new(private_key),
-            keyring: BTreeMap::new(),
+            keyring: RwLock::new(BTreeMap::new()),
         })
     }
 
@@ -49,7 +51,7 @@ impl Crypto {
             private: private_key.clone(),
             public: public_key,
             signing: SigningKey::<Sha256>::new(private_key),
-            keyring: BTreeMap::new(),
+            keyring: RwLock::new(BTreeMap::new()),
         })
     }
 
@@ -68,19 +70,28 @@ impl Crypto {
 
     pub(crate) fn sign(&self, data: &str) -> String {
         let mut rng = rand::thread_rng();
+
         self.signing
             .sign_with_rng(&mut rng, data.as_bytes())
             .to_string()
     }
 
     // verify with existing key
-    pub(crate) fn verify(&self, id: Hash, data: &str, sig: &str) -> bool {
-        let entry = self.keyring.get(&id).unwrap();
+    pub(crate) async fn verify(&self, id: Hash, data: &str, sig: &str) -> bool {
+        let keyring = self.keyring.read().await;
+
+        let entry = keyring.get(&id).unwrap();
         let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
 
-        match Signature::try_from(sig.as_bytes()) {
-            Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
-            Err(_) => false,
+        if let Ok(s) = decode_hex(sig) {
+            match Signature::try_from(s.as_slice()) {
+                Ok(signature) => {
+                    ver_key.verify(data.as_bytes(), &signature).is_ok()
+                },
+                Err(_) => false,
+            }
+        } else {
+            false
         }
     }
 
@@ -104,9 +115,24 @@ impl Crypto {
     }
 
     // add/update key to keyring
-    pub(crate) fn entry(&mut self, id: Hash, key: &str) -> bool {
-        if let Ok(pub_key) = RsaPublicKey::from_pkcs1_pem(key) {
-            self.keyring.insert(id, (pub_key, timestamp()));
+    pub(crate) async fn entry(&self, id: Hash, key: &str) -> bool {
+        if let Ok(pub_key) = RsaPublicKey::from_pkcs1_pem(key) {  
+            let mut keyring = self.keyring.write().await;
+            keyring.insert(id, (pub_key, timestamp()));
+
+            if keyring.len() > MAX_KEYS {
+                // prune oldest key
+                
+                let t = keyring
+                    .iter_mut()
+                    .min_by(|&(_, &mut (_, a)), &(_, &mut (_, b))| a.cmp(&b))
+                    .unwrap()
+                    .0
+                    .to_owned();
+
+                keyring.remove(&t);
+            }
+
             true
         } else {
             false
@@ -114,8 +140,22 @@ impl Crypto {
     }
 
     // remove from keyring
-    pub(crate) fn remove(&mut self, id: Hash) {
-        self.keyring.remove(&id);
+    pub(crate) async fn remove(&self, id: Hash) {
+        let mut keyring = self.keyring.write().await;
+        keyring.remove(&id);
+    }
+
+    pub(crate) async fn if_unknown<F>(&self, id: Hash, f: impl FnOnce() -> F) -> bool
+    where 
+        F: Future<Output = bool> {
+        let keyring = self.keyring.read().await;
+
+        if !keyring.contains_key(&id) {
+            drop(keyring);
+            f().await
+        } else {
+            false
+        }
     }
 
     pub(crate) async fn verify_args<F>(&self, args: &RpcArgs, backup: impl FnOnce() -> F) -> bool
@@ -123,37 +163,44 @@ impl Crypto {
         F: Future<Output = ()>,
     {
         let ctx = args.0.clone();
+        let keyring = self.keyring.read().await;
 
-        if self.keyring.contains_key(&ctx.id) {
+        if keyring.contains_key(&ctx.id) {
             self.verify(
                 args.0.id,
-                serde_json::to_string(&ctx).unwrap().as_str(),
+                serde_json::to_string(&ctx).as_ref().unwrap(),
                 &args.1,
-            )
+            ).await
         } else {
             // if key doesn't exist, try and get it. if it still doesn't exist, give up.
+            drop(keyring);
             backup().await;
 
-            if self.keyring.contains_key(&ctx.id) {
+            let keyring = self.keyring.read().await;
+            if keyring.contains_key(&ctx.id) {                
                 self.verify(
                     args.0.id,
-                    serde_json::to_string(&ctx).unwrap().as_str(),
+                    serde_json::to_string(&ctx).as_ref().unwrap(),
                     &args.1,
-                )
+                ).await
             } else {
+                self.remove(ctx.id).await;
                 false
             }
         }
     }
 
-    pub(crate) fn verify_results(&self, id: Hash, results: &RpcResults) -> bool {
-        if self.keyring.contains_key(&id) {
+    pub(crate) async fn verify_results(&self, id: Hash, results: &RpcResults) -> bool {
+        let keyring = self.keyring.read().await;
+
+        if keyring.contains_key(&id) {
             self.verify(
                 id,
-                serde_json::to_string(&results.0).unwrap().as_str(),
+                serde_json::to_string(&results.0).as_ref().unwrap(),
                 &results.1,
-            )
+            ).await
         } else {
+            self.remove(id).await;
             false
         }
     }

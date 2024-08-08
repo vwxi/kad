@@ -1,22 +1,25 @@
 use crate::{
-    node::{KadNode, KadNodeRef},
+    node::{Kad, KadNodeRef},
     routing::RoutingTable,
-    util::{Addr, Hash, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
+    util::{Addr, Hash, Peer, RpcArgs, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
-use futures::{future, prelude::*};
-use std::time::Duration;
-use std::{error::Error, net::SocketAddr};
+use futures::{
+    future::{AbortHandle, Abortable},
+    prelude::*,
+};
+use serde::{Deserialize, Serialize};
+use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 use tarpc::{
     client, context,
-    server::{self, incoming::Incoming, Channel},
+    server::{BaseChannel, Channel},
     tokio_serde::formats::Json,
+    transport::channel::{ChannelError, UnboundedChannel},
 };
 use tokio::{task::JoinHandle, time::timeout};
-use tracing::debug;
+use tracing::{debug, error};
 
-pub(crate) const TIMEOUT: u64 = 15;
-pub(crate) const OP_TIMEOUT: u64 = 30;
+pub(crate) const TIMEOUT: u64 = 30;
 
 #[tarpc::service]
 pub(crate) trait RpcService {
@@ -27,57 +30,77 @@ pub(crate) trait RpcService {
 
 #[derive(Clone)]
 pub(crate) struct Service {
+    pub(crate) client: RpcServiceClient,
     pub(crate) node: KadNodeRef,
     pub(crate) addr: SocketAddr,
+}
+
+// hacky
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RpcMessage<Req, Resp> {
+    Request(Req),
+    Response(Resp),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum RpcError {
+    ChannelError(ChannelError),
+    IOError(std::io::Error),
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            RpcError::ChannelError(e) => write!(f, "{}", e.to_string().as_str()),
+            RpcError::IOError(e) => write!(f, "{}", e.to_string().as_str()),
+        }
+    }
+}
+
+impl From<ChannelError> for RpcError {
+    fn from(e: ChannelError) -> RpcError {
+        RpcError::ChannelError(e)
+    }
+}
+
+impl From<std::io::Error> for RpcError {
+    fn from(e: std::io::Error) -> RpcError {
+        RpcError::IOError(e)
+    }
 }
 
 impl Service {
     // get_addresses, find_node, find_value and store will have a two-step arg validation
     pub(crate) async fn verify(&self, args: &RpcArgs) -> Result<(), RpcResults> {
-        let binding = self.node.lock().await;
-        let crypto = binding.crypto.lock().await;
-
-        if crypto
+        if self.node.crypto
             .verify_args(args, || async {
-                let kad = binding.kad.upgrade().unwrap();
-                let handle = kad.runtime.handle();
-                let args_copy = args.clone();
-                let node_copy = self.node.clone();
-
-                let _ = handle
-                    .spawn_blocking(move || {
-                        let _ =
-                            KadNode::key(node_copy, Peer::new(args_copy.0.id, args_copy.0.addr));
-                    })
-                    .await;
+                if let Ok((RpcResult::Key(key), _)) = self.client.key(context::current()).await {
+                    self.node.crypto.entry(args.0.id, key.as_str()).await;
+                }
             })
             .await
         {
             Ok(())
         } else {
-            Err(crypto.results(RpcResult::Bad))
+            Err(self.node.crypto.results(RpcResult::Bad))
         }
     }
 }
 
 impl RpcService for Service {
     async fn key(self, _: context::Context) -> RpcResults {
-        let binding = self.node.lock().await;
-        let crypto = binding.crypto.lock().await;
-
-        crypto.results(if let Ok(k) = crypto.public_key_as_string() {
+        self.node.crypto.results(if let Ok(k) = self.node.crypto.public_key_as_string() {
             RpcResult::Key(k)
         } else {
             RpcResult::Bad
         })
     }
 
-    // pings are not IDENTIFICATION. we're just seeing if we speak the same language
+    // pings are not identification. we're just seeing if we speak the same language
     async fn ping(self, _: context::Context) -> RpcResults {
-        let binding = self.node.lock().await;
-        let crypto = binding.crypto.lock().await;
-
-        crypto.results(RpcResult::Ping)
+        self.node.crypto.results(RpcResult::Ping)
     }
 
     async fn find_node(self, _: context::Context, args: RpcArgs, id: Hash) -> RpcResults {
@@ -85,28 +108,78 @@ impl RpcService for Service {
             return r;
         }
 
-        let binding = self.node.lock().await;
-        let crypto = binding.crypto.lock().await;
+        let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
 
-        let bkt = RoutingTable::find_bucket(binding.table.as_ref().unwrap().clone(), id);
-
-        crypto.results(RpcResult::FindNode(bkt))
+        self.node.crypto.results(RpcResult::FindNode(bkt))
     }
 }
 
+type TwoWay<Req1, Resp1, Req2, Resp2> =
+    (UnboundedChannel<Req1, Resp1>, UnboundedChannel<Resp2, Req2>);
+
 #[async_trait]
 pub(crate) trait Network {
-    async fn spawn<F: Future<Output = ()> + Send + 'static>(fut: F) {
-        tokio::spawn(fut);
+    // the two-way RPC code is derived from https://github.com/google/tarpc/issues/300#issuecomment-617599457
+    fn spawn_twoway<Req1, Resp1, Req2, Resp2, T>(transport: T) -> TwoWay<Req1, Resp1, Req2, Resp2>
+    where
+        T: Stream<Item = std::io::Result<RpcMessage<Req1, Resp2>>>,
+        T: Sink<RpcMessage<Req2, Resp1>, Error = std::io::Error>,
+        T: Unpin + Send + 'static,
+        Req1: Send + 'static,
+        Resp1: Send + 'static,
+        Req2: Send + 'static,
+        Resp2: Send + 'static,
+    {
+        let (server, server_) = tarpc::transport::channel::unbounded();
+        let (client, client_) = tarpc::transport::channel::unbounded();
+        let (mut server_sink, server_stream) = server.split();
+        let (mut client_sink, client_stream) = client.split();
+        let (transport_sink, mut transport_stream) = transport.split();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+
+        // receiving task
+        tokio::spawn(async move {
+            let e: Result<(), RpcError> = async move {
+                while let Some(m) = transport_stream.next().await {
+                    match m? {
+                        RpcMessage::Request(req) => server_sink.send(req).await?,
+                        RpcMessage::Response(resp) => client_sink.send(resp).await?
+                    }
+                }
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = e {
+                error!("failed to forward messages to server: {}", e);
+            }
+
+            abort_handle.abort();
+        });
+
+        // sending task
+        let channel = Abortable::new(
+            futures::stream::select(
+                server_stream.map_ok(RpcMessage::Response),
+                client_stream.map_ok(RpcMessage::Request),
+            )
+            .map_err(RpcError::ChannelError),
+            abort_registration,
+        );
+
+        tokio::spawn(
+            channel
+                .forward(transport_sink.sink_map_err(RpcError::IOError))
+                .inspect_ok(|_| {})
+                .inspect_err(|e| error!("outbound message handle error: {}", e)),
+        );
+
+        (server_, client_)
     }
 
-    async fn serve(node: KadNodeRef) -> JoinHandle<Result<(), ()>> {
+    async fn serve(node_: KadNodeRef) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let addr;
-            {
-                let n = node.lock().await;
-                addr = n.addr;
-            }
+            let addr = node_.addr;
 
             if let Ok(mut listener) =
                 tarpc::serde_transport::tcp::listen(&addr, Json::default).await
@@ -117,50 +190,66 @@ pub(crate) trait Network {
 
                 listener
                     .filter_map(|r| future::ready(r.ok()))
-                    .map(server::BaseChannel::with_defaults)
-                    .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
-                    .map(|channel| {
-                        let server = Service {
-                            node: node.clone(),
-                            addr: channel.transport().peer_addr().unwrap(),
+                    .map(|i| {
+                        let peer_addr = i.peer_addr().unwrap();
+                        let (srv, clt) = Self::spawn_twoway(i);
+                        let service = Service {
+                            client: RpcServiceClient::new(client::Config::default(), clt).spawn(),
+                            node: node_.clone(),
+                            addr: peer_addr,
                         };
 
-                        debug!("peer {:?} connecting", server.addr);
-
-                        channel.execute(server.serve()).for_each(Self::spawn)
+                        BaseChannel::with_defaults(srv)
+                            .execute(service.serve())
+                            .for_each(|resp| async move {
+                                tokio::spawn(resp);
+                            })
                     })
                     .buffer_unordered(10)
-                    .for_each(|()| async {})
+                    .for_each(|_| async {})
                     .await;
-
-                Ok(())
-            } else {
-                Err(())
             }
         })
     }
 
-    async fn connect(addr: Addr) -> Result<RpcServiceClient, Box<dyn Error>> {
+    async fn connect(kad: Arc<Kad>, addr: Addr) -> Result<Service, Box<dyn Error>> {
         let mut transport = tarpc::serde_transport::tcp::connect(&addr, Json::default);
         transport.config_mut().max_frame_length(usize::MAX);
 
-        Ok(RpcServiceClient::new(client::Config::default(), transport.await?).spawn())
+        let i = transport.await?;
+        let peer_addr = i.peer_addr().unwrap();
+        let (srv, clt) = Self::spawn_twoway(i);
+        let service = Service {
+            client: RpcServiceClient::new(client::Config::default(), clt).spawn(),
+            node: kad.node.clone(),
+            addr: peer_addr,
+        };
+
+        tokio::spawn(BaseChannel::with_defaults(srv)
+            .execute(service.clone().serve())
+            .for_each(|resp| async move {
+                tokio::spawn(resp);
+            }));
+
+        Ok(service)
     }
 
-    async fn connect_peer(peer: Peer) -> Result<(RpcServiceClient, SinglePeer), SinglePeer> {
+    async fn connect_peer(kad: Arc<Kad>, peer: Peer) -> Result<(Service, SinglePeer), SinglePeer> {
         let mut addr = peer.addresses.iter().peekable();
 
         let mut last_addr = addr.peek().unwrap().0;
 
-        let connection: Option<RpcServiceClient> = loop {
+        let connection: Option<Service> = loop {
             match addr.peek() {
                 Some(current) => {
                     last_addr = current.0;
 
-                    if let Ok(Ok(client)) =
-                        timeout(Duration::from_secs(TIMEOUT), Self::connect(current.0)).await
+                    if let Ok(Ok(service)) =
+                        timeout(Duration::from_secs(TIMEOUT), Self::connect(kad.clone(), current.0)).await
                     {
-                        break Some(client);
+                        break Some(service);
+                    } else {
+                        addr.next();
                     }
                 }
                 None => break None,
@@ -188,65 +277,65 @@ impl Network for KadNetwork {}
 mod tests {
     use crate::{
         node::{Kad, KadNode, ResponsiveMockPinger},
-        routing::{RoutingTable, BUCKET_SIZE, KEY_SIZE},
+        routing::{RoutingTable, BUCKET_SIZE},
         util::{generate_peer, Hash, Peer},
     };
+    use futures::executor::block_on;
+    use rsa::pkcs1::EncodeRsaPublicKey;
     use tracing_test::traced_test;
+
+    #[test]
+    #[traced_test]
+    fn key() {
+        let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
+        let (handle1, handle2) = (first.clone().serve(), second.clone().serve());
+
+        let second_addr = second.clone().addr();
+        let second_peer = Peer::new(second.clone().id(), second_addr);
+
+        let _ = KadNode::key(first.node.clone(), second_peer.clone()).unwrap();
+
+        let keyring = first.node.crypto.keyring.blocking_read();
+
+        let result = keyring
+            .get(&second_peer.id)
+            .unwrap()
+            .0
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .unwrap();
+
+        assert_eq!(result, second.node.crypto.public_key_as_string().unwrap());
+
+        handle1.abort();
+        handle2.abort();
+    }
 
     #[traced_test]
     #[test]
     fn find_node() {
-        let (kad1, kad2) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (kad1.clone().serve(), kad2.clone().serve());
+        let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
+        let (handle1, handle2) = (first.clone().serve(), second.clone().serve());
 
         let to_find = Hash::from(1);
 
-        let addr1 = kad1.clone().addr();
-        let peer1 = Peer::new(kad1.clone().id(), addr1);
+        let second_addr = second.clone().addr();
+        let second_peer = Peer::new(second.clone().id(), second_addr);
 
-        let addr2 = kad2.clone().addr();
-        let peer2 = Peer::new(kad2.clone().id(), addr2);
-
-        let table;
-        {
-            let kad = kad2.clone();
-            let binding = kad.node.blocking_lock();
-            table = binding.table.as_ref().unwrap().clone();
-        }
-
-        let temp = Hash::from(1) << (KEY_SIZE - 1);
-
-        {
-            let mut lock = table.blocking_lock();
-            lock.id = temp;
-        }
-
-        for i in 0..BUCKET_SIZE {
-            RoutingTable::update::<ResponsiveMockPinger>(
-                table.clone(),
+        for i in 0..(BUCKET_SIZE - 1) {
+            block_on(RoutingTable::update::<ResponsiveMockPinger>(
+                second.node.table.clone(),
                 generate_peer(Some(Hash::from(i))),
-            );
+            ));
         }
 
-        RoutingTable::update::<ResponsiveMockPinger>(
-            table.clone(),
-            generate_peer(Some(Hash::from(3) << (KEY_SIZE - 2))),
-        );
+        let reference = block_on(RoutingTable::find_bucket(second.node.table.clone(), to_find));
 
-        {
-            let reference;
-            {
-                let kad = kad2.clone();
-                let binding = kad.node.blocking_lock();
-                let table = binding.table.as_ref().unwrap().clone();
-                reference = RoutingTable::find_bucket(table, to_find);
-            }
+        assert!(!reference.is_empty());
 
-            let res = KadNode::find_node(kad1.node.clone(), peer2.clone(), to_find).unwrap();
+        let res = KadNode::find_node(first.node.clone(), second_peer.clone(), to_find).unwrap();
 
-            assert!(!res.is_empty());
-            assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
-        }
+        assert!(!res.is_empty());
+        assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
 
         handle1.abort();
         handle2.abort();
