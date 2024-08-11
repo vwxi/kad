@@ -1,37 +1,33 @@
 use crate::{
-    crypto::Crypto,
-    routing::{RoutingTable, TableRef},
-    rpc::{KadNetwork, Network},
-    util::{timestamp, Addr, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer},
+    crypto::Crypto, routing::{RoutingTable, TableRef}, rpc::{KadNetwork, Network}, store::{Store, StoreEntry}, util::{timestamp, Addr, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer}
 };
 use bigint::U256;
+use futures::executor::block_on;
 use rsa::sha2::{Digest, Sha256};
 use std::sync::{Arc, Weak};
 use std::{
     error::Error,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr}
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 use tarpc::context;
 use tokio::{
     runtime::{Handle, Runtime},
-    task::JoinHandle
+    task::JoinHandle,
 };
 use tracing::debug;
 
 pub(crate) struct KadNode {
     pub(crate) addr: Addr,
     pub(crate) crypto: Crypto,
+    pub(crate) store: Store,
     pub(crate) table: TableRef,
     pub(crate) kad: Weak<Kad>,
 }
 
 pub struct Kad {
-    pub(crate) node: KadNodeRef,
+    pub(crate) node: Arc<KadNode>,
     pub(crate) runtime: Runtime,
 }
-
-pub(crate) type KadNodeRef = Arc<KadNode>;
-pub(crate) type WeakNodeRef = Weak<KadNode>;
 
 impl Kad {
     pub fn new(port: u16, ipv6: bool, local: bool) -> Arc<Self> {
@@ -50,22 +46,30 @@ impl Kad {
         KadNode::ping(self.node.clone(), peer)
     }
 
-    pub fn addr(self: Arc<Self>) -> Addr {
+    pub fn addr(self: &Arc<Self>) -> Addr {
         self.node.addr
     }
 
-    pub fn id(self: Arc<Self>) -> Hash {
+    pub fn id(self: &Arc<Self>) -> Hash {
         let table = self.node.table.blocking_lock();
 
         table.id
     }
+
+    pub(crate) fn as_single_peer(self: Arc<Self>) -> SinglePeer {
+        SinglePeer {
+            id: self.id(),
+            addr: self.node.addr
+        }
+    }
+    
 }
 
 macro_rules! kad_fn {
     // without rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(node: KadNodeRef, peer: Peer) -> Result<$return_type, SinglePeer> {
+        pub(crate) fn $func(node: Arc<KadNode>, peer: Peer) -> Result<$return_type, SinglePeer> {
             // hacky
             let kad = node.kad.upgrade().unwrap();
 
@@ -102,7 +106,7 @@ macro_rules! kad_fn {
     // with rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(node: KadNodeRef, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
+        pub(crate) fn $func(node: Arc<KadNode>, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
             let kad = node.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
@@ -125,12 +129,12 @@ macro_rules! kad_fn {
             handle.block_on(async {
                 match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if node.crypto.if_unknown(responding_peer.id, || async {
+                        if node.crypto.if_unknown(&responding_peer.id, || async {
                             if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
                                 let mut hasher = Sha256::new();
                                 hasher.update(key.as_bytes());
                                 let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
-                
+
                                 if key_hash == responding_peer.id {
                                     node.crypto.entry(responding_peer.id, key.as_str()).await
                                 } else {
@@ -140,7 +144,7 @@ macro_rules! kad_fn {
                                 false
                             }
                         }).await {
-                            match conn.client.$func(context::current(), args, $( $arg ),*).await {
+                            match conn.client.$func(context::current(), args).await {
                                 Ok(res) => {
                                     $closure(node.clone(), res, responding_peer).await
                                 },
@@ -161,6 +165,12 @@ macro_rules! kad_fn {
     }
 }
 
+// TODO: join mechanism
+// TODO: lookup_nodes mechanism
+// TODO: lookup_value mechanism
+// TODO: peer resolution mechanism
+// TODO: republish mechanism
+// TODO: iterative store mechanism
 impl KadNode {
     // TODO: implement non-local forwarding of some sort
     pub(crate) fn new(
@@ -168,7 +178,7 @@ impl KadNode {
         ipv6: bool,
         local: bool,
         k: Weak<Kad>,
-    ) -> Result<KadNodeRef, Box<dyn Error>> {
+    ) -> Result<Arc<KadNode>, Box<dyn Error>> {
         let a = (
             if ipv6 {
                 if local {
@@ -184,22 +194,29 @@ impl KadNode {
             port,
         );
 
-        let c = Crypto::new()?;
-        let mut hasher = Sha256::new();
+        Ok(Arc::new_cyclic(|gadget| {
+            let c = Crypto::new(gadget.clone()).unwrap();
 
-        hasher.update(c.public_key_as_string().unwrap().as_bytes());
+            let mut hasher = Sha256::new();
+            hasher.update(c.public_key_as_string().unwrap().as_bytes());
+            let id = Hash::from_little_endian(hasher.finalize().as_mut_slice());
+    
+            let kn = KadNode {
+                addr: a,
+                table: RoutingTable::new(id, gadget.clone()),
+                store: Store::new(gadget.clone()),
+                crypto: c,
+                kad: k,
+            };
 
-        let id = Hash::from_little_endian(hasher.finalize().as_mut_slice());
+            // add own key
+            block_on(kn.crypto.entry(id, kn.crypto.public_key_as_string().unwrap().as_str()));
 
-        Ok(Arc::new_cyclic(|gadget| KadNode {
-            addr: a,
-            table: RoutingTable::new(id, gadget.clone()),
-            crypto: c,
-            kad: k,
+            kn
         }))
     }
 
-    pub(crate) fn serve(handle: &Handle, node: KadNodeRef) -> JoinHandle<()> {
+    pub(crate) fn serve(handle: &Handle, node: Arc<KadNode>) -> JoinHandle<()> {
         handle.block_on(KadNetwork::serve(node))
     }
 
@@ -209,7 +226,7 @@ impl KadNode {
         key,
         RpcOp::Key,
         SinglePeer,
-        |node: KadNodeRef, res: RpcResults, resp: SinglePeer| async move {
+        |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             // check if hash(key) == id then add to keystore
             if let RpcResult::Key(result) = res.0 {
                 let mut hasher = Sha256::new();
@@ -247,13 +264,33 @@ impl KadNode {
     // get_addresses, find_node, find_value and store will update the routing table
 
     kad_fn!(
+        store,
+        |entry: StoreEntry| RpcOp::Store(entry),
+        bool,
+        |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
+            if let RpcResult::Store = res.0.clone() {
+                if node.crypto.verify_results(&resp.id, &res).await {
+                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+                
+                    Ok(true)
+                } else {
+                    Err(resp)
+                }
+            } else {
+                Ok(false)
+            }
+        },
+        (entry: StoreEntry)
+    );
+
+    kad_fn!(
         find_node,
         |id: Hash| RpcOp::FindNode(id),
         Vec<SinglePeer>,
-        |node: KadNodeRef, res: RpcResults, resp: SinglePeer| async move {    
+        |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             // check if results are okay
             if let RpcResult::FindNode(peers) = res.0.clone() {
-                if node.crypto.verify_results(resp.id, &res).await {
+                if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
 
                     Ok(peers)
@@ -270,7 +307,7 @@ impl KadNode {
 
 pub(crate) trait Pinger {
     // this function only exists to facilitate easier test mocking
-    fn ping_peer(node: KadNodeRef, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(node: Arc<KadNode>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
         KadNode::ping(node, peer)
     }
 }
@@ -282,7 +319,7 @@ impl Pinger for RealPinger {}
 #[derive(Default)]
 pub(crate) struct ResponsiveMockPinger {}
 impl Pinger for ResponsiveMockPinger {
-    fn ping_peer(_: KadNodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, SinglePeer> {
         Ok(SinglePeer {
             id: p.id,
             addr: p.addresses.first().unwrap().0,
@@ -293,7 +330,7 @@ impl Pinger for ResponsiveMockPinger {
 #[derive(Default)]
 pub(crate) struct UnresponsiveMockPinger {}
 impl Pinger for UnresponsiveMockPinger {
-    fn ping_peer(_: KadNodeRef, p: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, SinglePeer> {
         Err(SinglePeer {
             id: p.id,
             addr: p.addresses.first().unwrap().0,

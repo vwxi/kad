@@ -1,7 +1,7 @@
 use crate::{
-    node::{Kad, KadNodeRef},
+    node::{Kad, KadNode},
     routing::RoutingTable,
-    util::{Addr, Hash, Peer, RpcArgs, RpcResult, RpcResults, SinglePeer},
+    util::{Addr, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
 use futures::{
@@ -25,13 +25,14 @@ pub(crate) const TIMEOUT: u64 = 30;
 pub(crate) trait RpcService {
     async fn key() -> RpcResults;
     async fn ping() -> RpcResults;
-    async fn find_node(args: RpcArgs, id: Hash) -> RpcResults;
+    async fn store(args: RpcArgs) -> RpcResults;
+    async fn find_node(args: RpcArgs) -> RpcResults;
 }
 
 #[derive(Clone)]
 pub(crate) struct Service {
     pub(crate) client: RpcServiceClient,
-    pub(crate) node: KadNodeRef,
+    pub(crate) node: Arc<KadNode>,
     pub(crate) addr: SocketAddr,
 }
 
@@ -74,7 +75,9 @@ impl From<std::io::Error> for RpcError {
 impl Service {
     // get_addresses, find_node, find_value and store will have a two-step arg validation
     pub(crate) async fn verify(&self, args: &RpcArgs) -> Result<(), RpcResults> {
-        if self.node.crypto
+        if self
+            .node
+            .crypto
             .verify_args(args, || async {
                 if let Ok((RpcResult::Key(key), _)) = self.client.key(context::current()).await {
                     self.node.crypto.entry(args.0.id, key.as_str()).await;
@@ -91,11 +94,13 @@ impl Service {
 
 impl RpcService for Service {
     async fn key(self, _: context::Context) -> RpcResults {
-        self.node.crypto.results(if let Ok(k) = self.node.crypto.public_key_as_string() {
-            RpcResult::Key(k)
-        } else {
-            RpcResult::Bad
-        })
+        self.node
+            .crypto
+            .results(if let Ok(k) = self.node.crypto.public_key_as_string() {
+                RpcResult::Key(k)
+            } else {
+                RpcResult::Bad
+            })
     }
 
     // pings are not identification. we're just seeing if we speak the same language
@@ -103,14 +108,36 @@ impl RpcService for Service {
         self.node.crypto.results(RpcResult::Ping)
     }
 
-    async fn find_node(self, _: context::Context, args: RpcArgs, id: Hash) -> RpcResults {
+    async fn store(self, _: context::Context, args: RpcArgs) -> RpcResults {
         if let Err(r) = self.verify(&args).await {
             return r;
         }
 
-        let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
+        let sender = SinglePeer::new(args.0.id, args.0.addr);
 
-        self.node.crypto.results(RpcResult::FindNode(bkt))
+        if let RpcOp::Store(s) = args.0.op {
+            self.node.crypto.results(if self.node.store.put(sender, s).await {
+                RpcResult::Store
+            } else {
+                RpcResult::Bad
+            })
+        } else {
+            self.node.crypto.results(RpcResult::Bad)
+        }
+    }
+
+    async fn find_node(self, _: context::Context, args: RpcArgs) -> RpcResults {
+        if let Err(r) = self.verify(&args).await {
+            return r;
+        }
+
+        if let RpcOp::FindNode(id) = args.0.op {
+            let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
+
+            self.node.crypto.results(RpcResult::FindNode(bkt))
+        } else {
+            self.node.crypto.results(RpcResult::Bad)
+        }
     }
 }
 
@@ -143,7 +170,7 @@ pub(crate) trait Network {
                 while let Some(m) = transport_stream.next().await {
                     match m? {
                         RpcMessage::Request(req) => server_sink.send(req).await?,
-                        RpcMessage::Response(resp) => client_sink.send(resp).await?
+                        RpcMessage::Response(resp) => client_sink.send(resp).await?,
                     }
                 }
                 Ok(())
@@ -177,7 +204,7 @@ pub(crate) trait Network {
         (server_, client_)
     }
 
-    async fn serve(node_: KadNodeRef) -> JoinHandle<()> {
+    async fn serve(node_: Arc<KadNode>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let addr = node_.addr;
 
@@ -225,11 +252,13 @@ pub(crate) trait Network {
             addr: peer_addr,
         };
 
-        tokio::spawn(BaseChannel::with_defaults(srv)
-            .execute(service.clone().serve())
-            .for_each(|resp| async move {
-                tokio::spawn(resp);
-            }));
+        tokio::spawn(
+            BaseChannel::with_defaults(srv)
+                .execute(service.clone().serve())
+                .for_each(|resp| async move {
+                    tokio::spawn(resp);
+                }),
+        );
 
         Ok(service)
     }
@@ -244,8 +273,11 @@ pub(crate) trait Network {
                 Some(current) => {
                     last_addr = current.0;
 
-                    if let Ok(Ok(service)) =
-                        timeout(Duration::from_secs(TIMEOUT), Self::connect(kad.clone(), current.0)).await
+                    if let Ok(Ok(service)) = timeout(
+                        Duration::from_secs(TIMEOUT),
+                        Self::connect(kad.clone(), current.0),
+                    )
+                    .await
                     {
                         break Some(service);
                     } else {
@@ -328,7 +360,10 @@ mod tests {
             ));
         }
 
-        let reference = block_on(RoutingTable::find_bucket(second.node.table.clone(), to_find));
+        let reference = block_on(RoutingTable::find_bucket(
+            second.node.table.clone(),
+            to_find,
+        ));
 
         assert!(!reference.is_empty());
 
