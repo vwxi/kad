@@ -1,22 +1,33 @@
 use crate::{
-    node::{KadNodeRef, Pinger, WeakNodeRef},
+    node::{KadNode, Pinger},
     util::{timestamp, Hash, Peer, SinglePeer},
 };
-use std::sync::Arc;
+use futures::future::{BoxFuture, FutureExt};
+use std::sync::{Arc, Weak};
 use tokio::sync::Mutex;
 use tracing::debug;
-use futures::future::{BoxFuture, FutureExt};
 
-#[cfg(test)]
-pub(crate) const BUCKET_SIZE: usize = 3;
-#[cfg(not(test))]
-pub(crate) const BUCKET_SIZE: usize = 20;
-pub(crate) const KEY_SIZE: usize = 64;
 pub(crate) const ADDRESS_LIMIT: usize = 5;
 pub(crate) const MISSED_PINGS_ALLOWED: usize = 3;
 pub(crate) const MISSED_MESSAGES_ALLOWED: usize = 3;
 pub(crate) const CACHE_SIZE: usize = 3;
 pub(crate) const ALPHA: usize = 3;
+
+crate::util::pred_block! {
+    #[cfg(test)] {
+        pub(crate) const BUCKET_SIZE: usize = 3;
+        pub(crate) const KEY_SIZE: usize = 64;
+        pub(crate) const REFRESH_TIME: u64 = 5;
+        pub(crate) const REFRESH_INTERVAL: usize = 10;
+    }
+
+    #[cfg(not(test))] {
+        pub(crate) const BUCKET_SIZE: usize = 20;
+        pub(crate) const KEY_SIZE: usize = 256;
+        pub(crate) const REFRESH_TIME: u64 = 3600;
+        pub(crate) const REFRESH_INTERVAL: usize = 600;
+    }
+}
 
 // the prefix trie model is used in this implementation.
 // this may be changed in the future.
@@ -38,7 +49,7 @@ pub(crate) struct Trie {
 pub(crate) struct RoutingTable {
     pub(crate) id: Hash,
     root: TrieRef,
-    node: WeakNodeRef,
+    node: Weak<KadNode>,
 }
 
 pub(crate) type InnerTrieRef = Arc<Mutex<Trie>>;
@@ -92,7 +103,8 @@ impl Bucket {
             let entry = self.peers.iter_mut().last().unwrap();
 
             // check if address is new and if address count is under limit
-            if !entry.addresses.iter().any(|x| x.0 == peer.addr) && entry.addresses.len() < ADDRESS_LIMIT
+            if !entry.addresses.iter().any(|x| x.0 == peer.addr)
+                && entry.addresses.len() < ADDRESS_LIMIT
             {
                 // add to address list
                 debug!("new address {:?} for node {:#x}", peer.addr, entry.id);
@@ -153,8 +165,9 @@ impl Trie {
     }
 }
 
+// TODO: refresh mechanism
 impl RoutingTable {
-    pub(crate) fn new(i: Hash, n: WeakNodeRef) -> TableRef {
+    pub(crate) fn new(i: Hash, n: Weak<KadNode>) -> TableRef {
         let rt = Arc::new(Mutex::new(RoutingTable {
             id: i,
             root: None,
@@ -186,7 +199,8 @@ impl RoutingTable {
 
             drop(current);
             Self::traverse(Some(next.clone()), key, cutoff + 1).await
-        }.boxed()
+        }
+        .boxed()
     }
 
     pub(crate) async fn find(table: TableRef, id: Hash) -> Option<Peer> {
@@ -235,7 +249,7 @@ impl RoutingTable {
         Self::update_trie::<P>(table, &mut trie, peer).await;
     }
 
-    async fn responded(node: KadNodeRef, trie: &mut Trie, peer: &SinglePeer) {
+    async fn responded(node: Arc<KadNode>, trie: &mut Trie, peer: &SinglePeer) {
         if let Some(bkt) = &mut trie.bucket {
             if let Some(bkt_idx) = bkt.peers.iter().position(|x| x.id == peer.id) {
                 if let Some(addr_idx) = bkt
@@ -307,7 +321,7 @@ impl RoutingTable {
                                 bkt.peers.remove(bkt_idx);
 
                                 // remove peer from keyring
-                                node.crypto.remove(peer.id).await;
+                                node.crypto.remove(&peer.id).await;
                             } else {
                                 debug!("node {:#x} still has addresses in entry", peer.id);
                             }
@@ -331,7 +345,7 @@ impl RoutingTable {
         }
     }
 
-    async fn stale(node: KadNodeRef, trie: &mut Trie, peer: &SinglePeer, to_add: SinglePeer) {
+    async fn stale(node: Arc<KadNode>, trie: &mut Trie, peer: &SinglePeer, to_add: SinglePeer) {
         if let Some(bkt) = &mut trie.bucket {
             if let Some(bkt_idx) = bkt.peers.iter().position(|x| x.id == peer.id) {
                 if let Some(addr_idx) = bkt
@@ -386,7 +400,7 @@ impl RoutingTable {
                                 bkt.peers.remove(bkt_idx);
 
                                 // remove peer from keyring
-                                node.crypto.remove(peer.id).await;
+                                node.crypto.remove(&peer.id).await;
                             }
                         }
                     }
@@ -398,7 +412,7 @@ impl RoutingTable {
     async fn update_trie<P: Pinger>(tbl: TableRef, trie: &mut Trie, peer: SinglePeer) {
         if let Some(bkt) = &mut trie.bucket {
             let table = tbl.lock().await;
-            
+
             let mask: Hash = Hash::max_value() << (KEY_SIZE - trie.cutoff);
 
             let exists = bkt.peers.iter().any(|x| x.id == peer.id);
@@ -466,7 +480,10 @@ mod tests {
 
         let table = kad.node.table.clone();
 
-        block_on(RoutingTable::update::<ResponsiveMockPinger>(table.clone(), generate_peer(None)));
+        block_on(RoutingTable::update::<ResponsiveMockPinger>(
+            table.clone(),
+            generate_peer(None),
+        ));
 
         let inner = table.blocking_lock();
         let root = inner.root.as_ref().unwrap().blocking_lock();
@@ -657,7 +674,10 @@ mod tests {
 
         let to_stale = generate_peer(Some(Hash::from(1)));
 
-        block_on(RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone()));
+        block_on(RoutingTable::update::<UnresponsiveMockPinger>(
+            table.clone(),
+            to_stale.clone(),
+        ));
 
         // insert far nodes
         for i in 2..(BUCKET_SIZE + 1) {
@@ -677,11 +697,17 @@ mod tests {
 
         // should become max staleness
         for _ in 0..=(MISSED_PINGS_ALLOWED + 1) {
-            block_on(RoutingTable::update::<UnresponsiveMockPinger>(table.clone(), to_stale.clone()));
+            block_on(RoutingTable::update::<UnresponsiveMockPinger>(
+                table.clone(),
+                to_stale.clone(),
+            ));
         }
 
         let stale = block_on(RoutingTable::find(table.clone(), to_stale.id));
-        let added = block_on(RoutingTable::find(table.clone(), Hash::from(70 | CACHE_SIZE)));
+        let added = block_on(RoutingTable::find(
+            table.clone(),
+            Hash::from(70 | CACHE_SIZE),
+        ));
 
         assert!(stale.is_none());
         assert!(added.is_some());

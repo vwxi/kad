@@ -1,5 +1,7 @@
 use std::{
-    net::{IpAddr, Ipv4Addr}, num::ParseIntError, time::{SystemTime, UNIX_EPOCH}
+    net::{IpAddr, Ipv4Addr},
+    num::ParseIntError,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bigint::uint::U256;
@@ -7,6 +9,19 @@ use serde::{Deserialize, Serialize};
 
 pub type Addr = (IpAddr, u16);
 pub type Hash = U256;
+
+macro_rules! pred_block {
+    ($( #[$meta:meta] {$($item:item)*} )*) => {
+        $($(
+            #[$meta]
+            $item
+        )*)*
+    }
+}
+
+pub(crate) use pred_block;
+
+use crate::store::StoreEntry;
 
 // a peer object with multiple addresses
 #[derive(Debug, Clone)]
@@ -40,7 +55,7 @@ impl Peer {
 }
 
 // a peer object with a single address
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct SinglePeer {
     pub id: Hash,
     pub addr: Addr,
@@ -95,7 +110,7 @@ pub(crate) enum RpcOp {
     Ping,
     FindNode(Hash),
     FindValue(Hash),
-    Store(String, String),
+    Store(StoreEntry),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,6 +118,7 @@ pub(crate) enum RpcResult {
     Bad,
     Key(String),
     Ping,
+    Store,
     FindNode(Vec<SinglePeer>),
 }
 
