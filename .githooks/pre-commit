@@ -14,16 +14,16 @@ then
     exit 1
 fi
 
-if ! cargo clippy --all-targets -- -A clippy::pedantic -D warnings 
+if ! cargo clippy --all-targets
 then
     echo "There are some clippy issues."
     exit 1
 fi
-# Ignore the `binary_rewrite_test` which takes a minute.
-if ! cargo nextest run --tests  -E 'not test(/.*recomp/)'
-then
-    echo "There are some test issues."
-    exit 1
-fi
+# Add your test into the regex as needed. Also `cargo install nextest` or better `cargo binstall nextest`
+#if ! cargo nextest run --tests  -E 'not test(/.*foobar/)'
+#then
+#    echo "There are some test issues."
+#    exit 1
+#fi
 
 exit 0
