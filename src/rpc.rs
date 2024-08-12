@@ -1,7 +1,7 @@
 use crate::{
-    node::{Kad, KadNode},
+    node::{Kad, KadNode, RealPinger},
     routing::RoutingTable,
-    util::{Addr, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
+    util::{Addr, FindValueResult, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
 use futures::{
@@ -27,6 +27,7 @@ pub(crate) trait RpcService {
     async fn ping() -> RpcResults;
     async fn store(args: RpcArgs) -> RpcResults;
     async fn find_node(args: RpcArgs) -> RpcResults;
+    async fn find_value(args: RpcArgs) -> RpcResults;
 }
 
 #[derive(Clone)]
@@ -115,8 +116,10 @@ impl RpcService for Service {
 
         let sender = SinglePeer::new(args.0.id, args.0.addr);
 
-        if let RpcOp::Store(s) = args.0.op {
-            self.node.crypto.results(if self.node.store.put(sender, s).await {
+        if let RpcOp::Store(k, v) = args.0.op {
+            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+            
+            self.node.crypto.results(if self.node.store.put(sender, k.as_str(), v).await {
                 RpcResult::Store
             } else {
                 RpcResult::Bad
@@ -131,10 +134,35 @@ impl RpcService for Service {
             return r;
         }
 
+        let sender = SinglePeer::new(args.0.id, args.0.addr);
+
         if let RpcOp::FindNode(id) = args.0.op {
             let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
 
+            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+
             self.node.crypto.results(RpcResult::FindNode(bkt))
+        } else {
+            self.node.crypto.results(RpcResult::Bad)
+        }
+    }
+
+    async fn find_value(self, _: context::Context, args: RpcArgs) -> RpcResults {
+        if let Err(r) = self.verify(&args).await {
+            return r;
+        }
+
+        let sender = SinglePeer::new(args.0.id, args.0.addr);
+
+        if let RpcOp::FindValue(id) = args.0.op {
+            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+
+            if let Some(e) = self.node.store.get(&id).await {
+                self.node.crypto.results(RpcResult::FindValue(FindValueResult::Value(e)))
+            } else {
+                let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
+                self.node.crypto.results(RpcResult::FindValue(FindValueResult::Nodes(bkt)))
+            }
         } else {
             self.node.crypto.results(RpcResult::Bad)
         }
@@ -204,13 +232,11 @@ pub(crate) trait Network {
         (server_, client_)
     }
 
-    async fn serve(node_: Arc<KadNode>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let addr = node_.addr;
+    async fn serve(node_: Arc<KadNode>) -> std::io::Result<JoinHandle<()>> {
+        let addr = node_.addr;
 
-            if let Ok(mut listener) =
-                tarpc::serde_transport::tcp::listen(&addr, Json::default).await
-            {
+        match tarpc::serde_transport::tcp::listen(&addr, Json::default).await {
+            Ok(mut listener) => Ok(tokio::spawn(async move {
                 listener.config_mut().max_frame_length(usize::MAX);
 
                 debug!("now listening for calls at {:?}:{}", addr.0, addr.1);
@@ -235,8 +261,9 @@ pub(crate) trait Network {
                     .buffer_unordered(10)
                     .for_each(|_| async {})
                     .await;
-            }
-        })
+            })),
+            Err(err) => Err(err)
+        }
     }
 
     async fn connect(kad: Arc<Kad>, addr: Addr) -> Result<Service, Box<dyn Error>> {
@@ -308,9 +335,7 @@ impl Network for KadNetwork {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        node::{Kad, KadNode, ResponsiveMockPinger},
-        routing::{RoutingTable, BUCKET_SIZE},
-        util::{generate_peer, Hash, Peer},
+        node::{Kad, KadNode, ResponsiveMockPinger}, routing::{RoutingTable, BUCKET_SIZE}, store::Value, util::{generate_peer, hash, Hash, Peer}
     };
     use futures::executor::block_on;
     use rsa::pkcs1::EncodeRsaPublicKey;
@@ -320,7 +345,7 @@ mod tests {
     #[traced_test]
     fn key() {
         let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (first.clone().serve(), second.clone().serve());
+        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
@@ -344,9 +369,27 @@ mod tests {
 
     #[traced_test]
     #[test]
+    fn store() {
+        let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
+        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
+
+        let second_addr = second.clone().addr();
+        let second_peer = Peer::new(second.clone().id(), second_addr);
+
+        let entry = first.node.store.create_new_entry(Value::Data(String::from("hello")));
+
+        assert!(KadNode::store(first.node.clone(), second_peer.clone(), String::from("good morning"), entry).unwrap());
+        assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
+
+        handle1.abort();
+        handle2.abort();
+    }
+
+    #[traced_test]
+    #[test]
     fn find_node() {
-        let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (first.clone().serve(), second.clone().serve());
+        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
+        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
 
         let to_find = Hash::from(1);
 

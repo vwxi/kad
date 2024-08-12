@@ -7,7 +7,7 @@ mod tests {
     #[traced_test]
     fn serve() {
         let kad = Kad::new(16161, false, true);
-        let handle = kad.serve();
+        let handle = kad.serve().unwrap();
 
         handle.abort();
     }
@@ -16,7 +16,7 @@ mod tests {
     #[traced_test]
     fn ping() {
         let (kad1, kad2) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (kad1.clone().serve(), kad2.clone().serve());
+        let (handle1, handle2) = (kad1.clone().serve().unwrap(), kad2.clone().serve().unwrap());
 
         let addr1 = kad1.clone().addr();
         let peer1 = Peer::new(kad1.clone().id(), addr1);

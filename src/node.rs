@@ -38,7 +38,7 @@ impl Kad {
         })
     }
 
-    pub fn serve(self: Arc<Self>) -> JoinHandle<()> {
+    pub fn serve(self: Arc<Self>) -> std::io::Result<JoinHandle<()>> {
         KadNode::serve(self.runtime.handle(), self.node.clone())
     }
 
@@ -56,7 +56,7 @@ impl Kad {
         table.id
     }
 
-    pub(crate) fn as_single_peer(self: Arc<Self>) -> SinglePeer {
+    pub(crate) fn as_single_peer(self: &Arc<Self>) -> SinglePeer {
         SinglePeer {
             id: self.id(),
             addr: self.node.addr
@@ -97,7 +97,10 @@ macro_rules! kad_fn {
                             },
                         }
                     }
-                    Err(single_peer) => Err(single_peer),
+                    Err(single_peer) => {
+                        debug!("could not connect to peer {:?}", single_peer.addr);
+                        Err(single_peer)
+                    },
                 }
             })
         }
@@ -158,7 +161,10 @@ macro_rules! kad_fn {
                             Err(responding_peer)
                         }
                     }
-                    Err(single_peer) => Err(single_peer),
+                    Err(single_peer) => {
+                        debug!("could not connect to peer {:?}", single_peer.addr);
+                        Err(single_peer)
+                    }
                 }
             })
         }
@@ -216,7 +222,7 @@ impl KadNode {
         }))
     }
 
-    pub(crate) fn serve(handle: &Handle, node: Arc<KadNode>) -> JoinHandle<()> {
+    pub(crate) fn serve(handle: &Handle, node: Arc<KadNode>) -> std::io::Result<JoinHandle<()>> {
         handle.block_on(KadNetwork::serve(node))
     }
 
@@ -265,7 +271,7 @@ impl KadNode {
 
     kad_fn!(
         store,
-        |entry: StoreEntry| RpcOp::Store(entry),
+        |key: String, entry: StoreEntry| RpcOp::Store(key, entry),
         bool,
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Store = res.0.clone() {
@@ -280,7 +286,7 @@ impl KadNode {
                 Ok(false)
             }
         },
-        (entry: StoreEntry)
+        (key: String, entry: StoreEntry)
     );
 
     kad_fn!(

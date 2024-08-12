@@ -5,6 +5,7 @@ use std::{
 };
 
 use bigint::uint::U256;
+use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
 pub type Addr = (IpAddr, u16);
@@ -79,6 +80,13 @@ impl SinglePeer {
     }
 }
 
+pub fn hash(s: &str) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_string(s).unwrap().as_bytes());
+
+    Hash::from_little_endian(hasher.finalize().as_mut_slice())
+}
+
 pub(crate) fn timestamp() -> u64 {
     let t = SystemTime::now();
     t.duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -110,7 +118,13 @@ pub(crate) enum RpcOp {
     Ping,
     FindNode(Hash),
     FindValue(Hash),
-    Store(StoreEntry),
+    Store(String, StoreEntry),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum FindValueResult {
+    Value(StoreEntry),
+    Nodes(Vec<SinglePeer>)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +134,7 @@ pub(crate) enum RpcResult {
     Ping,
     Store,
     FindNode(Vec<SinglePeer>),
+    FindValue(FindValueResult)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

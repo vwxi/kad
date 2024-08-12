@@ -1,8 +1,7 @@
 use crate::{
     node::KadNode,
-    util::{timestamp, Hash, SinglePeer},
+    util::{hash, timestamp, Hash, SinglePeer},
 };
-use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Weak};
 use tokio::sync::RwLock;
@@ -82,7 +81,7 @@ impl Store {
         (entry.0, signature)
     }
 
-    pub(crate) async fn put(&self, sender: SinglePeer, entry: StoreEntry) -> bool {
+    pub(crate) async fn put(&self, sender: SinglePeer, key: &str, entry: StoreEntry) -> bool {
         let node = self.node.upgrade().unwrap();
 
         // determine if origin key exists in keyring,
@@ -109,26 +108,26 @@ impl Store {
             return false;
         }
 
-        // check if origin signed data 
-        if node
-            .crypto
-            .verify(
-                &entry.0.origin.id,
-                serde_json::to_string(&entry.0.value).unwrap().as_str(),
-                entry.0.signature.as_str(),
-            )
-            .await
-        {
-            return false;
-        }
-
         // check if sender signed entry
-        if node
+        if !node
             .crypto
             .verify(
                 &sender.id,
                 serde_json::to_string(&entry.0).unwrap().as_str(),
                 entry.1.as_str(),
+            )
+            .await
+        {
+            return false;
+        }
+        
+        // check if origin signed data 
+        if !node
+            .crypto
+            .verify(
+                &entry.0.origin.id,
+                serde_json::to_string(&entry.0.value).unwrap().as_str(),
+                entry.0.signature.as_str(),
             )
             .await
         {
@@ -150,23 +149,17 @@ impl Store {
         }
 
         // add to hash table
-        let mut hasher = Sha256::new();
-        hasher.update(serde_json::to_string(&entry.0.value).unwrap().as_bytes());
-
-        let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
-        
-        let mut lock = self.store.write().await;
-        
-        lock.insert(key_hash, entry);
+        let mut lock = self.store.write().await;    
+        lock.insert(hash(key), entry);
 
         true
     }
 
     // get will re-sign the outer Entry object with its own key
-    pub(crate) async fn get(&self, id: &Hash) -> Option<StoreEntry> {
+    pub(crate) async fn get(&self, key: &Hash) -> Option<StoreEntry> {
         let lock = self.store.read().await;
 
-        lock.get(id).map(|entry| self.forward_entry(entry.clone()))
+        lock.get(key).map(|entry| self.forward_entry(entry.clone()))
     }
 }
 
@@ -175,7 +168,7 @@ mod tests {
     use futures::executor::block_on;
     use tracing_test::traced_test;
 
-    use crate::{node::Kad, store::Value};
+    use crate::{node::Kad, store::{ProviderRecord, Value, REPUBLISH_TIME}, util::{timestamp, Hash}};
 
     #[traced_test]
     #[test]
@@ -183,6 +176,34 @@ mod tests {
         let kad = Kad::new(16161, false, true);
         let entry = kad.node.store.create_new_entry(Value::Data(String::from("hello")));
     
-        assert!(block_on(kad.node.store.put(kad.clone().as_single_peer(), entry)));
+        assert!(block_on(kad.node.store.put(kad.as_single_peer(), "good morning", entry)));
+    }
+
+    #[traced_test]
+    #[test]
+    fn store_invalid_data() {
+        // bad signatures
+        let kad = Kad::new(16161, false, true);
+        let mut entry = kad.node.store.create_new_entry(Value::Data(String::from("hello")));
+
+        entry.0.signature = String::from("wlefplwefplwef");
+        entry.1 = String::from("wefwefwef");
+    
+        assert!(!block_on(kad.node.store.put(kad.as_single_peer(), "good morning", entry)));
+
+        // bad timestamp
+        let mut entry = kad.node.store.create_new_entry(Value::Data(String::from("hello")));
+
+        entry.0.timestamp += REPUBLISH_TIME + 1;
+    
+        assert!(!block_on(kad.node.store.put(kad.as_single_peer(), "good morning", entry)));
+
+        // bad 
+        let entry = kad.node.store.create_new_entry(Value::ProviderRecord(ProviderRecord {
+            provider: Hash::from(1),
+            expiry: timestamp() - REPUBLISH_TIME
+        }));
+
+        assert!(!block_on(kad.node.store.put(kad.as_single_peer(), "good morning", entry)));
     }
 }
