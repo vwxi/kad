@@ -124,7 +124,7 @@ pub(crate) enum RpcOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum FindValueResult {
     Value(StoreEntry),
-    Nodes(Vec<SinglePeer>)
+    Nodes(Vec<SinglePeer>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,7 +134,7 @@ pub(crate) enum RpcResult {
     Ping,
     Store,
     FindNode(Vec<SinglePeer>),
-    FindValue(FindValueResult)
+    FindValue(FindValueResult),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

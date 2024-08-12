@@ -1,9 +1,12 @@
 use crate::{
-    crypto::Crypto, routing::{RoutingTable, TableRef}, rpc::{KadNetwork, Network}, store::{Store, StoreEntry}, util::{timestamp, Addr, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer}
+    crypto::Crypto,
+    routing::{RoutingTable, TableRef},
+    rpc::{KadNetwork, Network},
+    store::{Store, StoreEntry},
+    util::{hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use bigint::U256;
 use futures::executor::block_on;
-use rsa::sha2::{Digest, Sha256};
 use std::sync::{Arc, Weak};
 use std::{
     error::Error,
@@ -59,10 +62,9 @@ impl Kad {
     pub(crate) fn as_single_peer(self: &Arc<Self>) -> SinglePeer {
         SinglePeer {
             id: self.id(),
-            addr: self.node.addr
+            addr: self.node.addr,
         }
     }
-    
 }
 
 macro_rules! kad_fn {
@@ -134,11 +136,7 @@ macro_rules! kad_fn {
                     Ok((conn, responding_peer)) => {
                         if node.crypto.if_unknown(&responding_peer.id, || async {
                             if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
-                                let mut hasher = Sha256::new();
-                                hasher.update(key.as_bytes());
-                                let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
-
-                                if key_hash == responding_peer.id {
+                                if hash(key.as_str()) == responding_peer.id {
                                     node.crypto.entry(responding_peer.id, key.as_str()).await
                                 } else {
                                     false
@@ -201,12 +199,9 @@ impl KadNode {
         );
 
         Ok(Arc::new_cyclic(|gadget| {
-            let c = Crypto::new(gadget.clone()).unwrap();
-
-            let mut hasher = Sha256::new();
-            hasher.update(c.public_key_as_string().unwrap().as_bytes());
-            let id = Hash::from_little_endian(hasher.finalize().as_mut_slice());
-    
+            let c = Crypto::new(gadget.clone()).unwrap();    
+            let id = hash(c.public_key_as_string().unwrap().as_str());
+            
             let kn = KadNode {
                 addr: a,
                 table: RoutingTable::new(id, gadget.clone()),
@@ -216,7 +211,10 @@ impl KadNode {
             };
 
             // add own key
-            block_on(kn.crypto.entry(id, kn.crypto.public_key_as_string().unwrap().as_str()));
+            block_on(
+                kn.crypto
+                    .entry(id, kn.crypto.public_key_as_string().unwrap().as_str()),
+            );
 
             kn
         }))
@@ -235,11 +233,7 @@ impl KadNode {
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             // check if hash(key) == id then add to keystore
             if let RpcResult::Key(result) = res.0 {
-                let mut hasher = Sha256::new();
-                hasher.update(result.as_bytes());
-                let key_hash = Hash::from_little_endian(hasher.finalize().as_mut_slice());
-
-                if key_hash == resp.id {
+                if hash(result.as_str()) == resp.id {
                     if node.crypto.entry(resp.id, result.as_str()).await {
                         Ok(resp)
                     } else {
@@ -277,7 +271,7 @@ impl KadNode {
             if let RpcResult::Store = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
-                
+
                     Ok(true)
                 } else {
                     Err(resp)
@@ -294,12 +288,31 @@ impl KadNode {
         |id: Hash| RpcOp::FindNode(id),
         Vec<SinglePeer>,
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
-            // check if results are okay
             if let RpcResult::FindNode(peers) = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
 
                     Ok(peers)
+                } else {
+                    Err(resp)
+                }
+            } else {
+                Err(resp)
+            }
+        },
+        (id: Hash)
+    );
+
+    kad_fn!(
+        find_value,
+        |id: Hash| RpcOp::FindValue(id),
+        FindValueResult,
+        |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
+            if let RpcResult::FindValue(result) = res.0.clone() {
+                if node.crypto.verify_results(&resp.id, &res).await {
+                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+                    
+                    Ok(result)
                 } else {
                     Err(resp)
                 }

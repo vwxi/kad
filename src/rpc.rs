@@ -118,12 +118,14 @@ impl RpcService for Service {
 
         if let RpcOp::Store(k, v) = args.0.op {
             RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
-            
-            self.node.crypto.results(if self.node.store.put(sender, k.as_str(), v).await {
-                RpcResult::Store
-            } else {
-                RpcResult::Bad
-            })
+
+            self.node
+                .crypto
+                .results(if self.node.store.put(sender, k.as_str(), v).await {
+                    RpcResult::Store
+                } else {
+                    RpcResult::Bad
+                })
         } else {
             self.node.crypto.results(RpcResult::Bad)
         }
@@ -158,10 +160,14 @@ impl RpcService for Service {
             RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
 
             if let Some(e) = self.node.store.get(&id).await {
-                self.node.crypto.results(RpcResult::FindValue(FindValueResult::Value(e)))
+                self.node
+                    .crypto
+                    .results(RpcResult::FindValue(FindValueResult::Value(e)))
             } else {
                 let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
-                self.node.crypto.results(RpcResult::FindValue(FindValueResult::Nodes(bkt)))
+                self.node
+                    .crypto
+                    .results(RpcResult::FindValue(FindValueResult::Nodes(bkt)))
             }
         } else {
             self.node.crypto.results(RpcResult::Bad)
@@ -262,7 +268,7 @@ pub(crate) trait Network {
                     .for_each(|_| async {})
                     .await;
             })),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 
@@ -335,7 +341,10 @@ impl Network for KadNetwork {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        node::{Kad, KadNode, ResponsiveMockPinger}, routing::{RoutingTable, BUCKET_SIZE}, store::Value, util::{generate_peer, hash, Hash, Peer}
+        node::{Kad, KadNode, ResponsiveMockPinger},
+        routing::{RoutingTable, BUCKET_SIZE},
+        store::Value,
+        util::{generate_peer, hash, FindValueResult, Hash, Peer},
     };
     use futures::executor::block_on;
     use rsa::pkcs1::EncodeRsaPublicKey;
@@ -345,7 +354,10 @@ mod tests {
     #[traced_test]
     fn key() {
         let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
+        let (handle1, handle2) = (
+            first.clone().serve().unwrap(),
+            second.clone().serve().unwrap(),
+        );
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
@@ -371,14 +383,26 @@ mod tests {
     #[test]
     fn store() {
         let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
-        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
+        let (handle1, handle2) = (
+            first.clone().serve().unwrap(),
+            second.clone().serve().unwrap(),
+        );
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
-        let entry = first.node.store.create_new_entry(Value::Data(String::from("hello")));
+        let entry = first
+            .node
+            .store
+            .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(KadNode::store(first.node.clone(), second_peer.clone(), String::from("good morning"), entry).unwrap());
+        assert!(KadNode::store(
+            first.node.clone(),
+            second_peer.clone(),
+            String::from("good morning"),
+            entry
+        )
+        .unwrap());
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
         handle1.abort();
@@ -389,7 +413,10 @@ mod tests {
     #[test]
     fn find_node() {
         let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
-        let (handle1, handle2) = (first.clone().serve().unwrap(), second.clone().serve().unwrap());
+        let (handle1, handle2) = (
+            first.clone().serve().unwrap(),
+            second.clone().serve().unwrap(),
+        );
 
         let to_find = Hash::from(1);
 
@@ -415,6 +442,54 @@ mod tests {
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
 
+        handle1.abort();
+        handle2.abort();
+    }
+
+    #[traced_test]
+    #[test]
+    fn find_value() {
+        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
+        let (handle1, handle2) = (
+            first.clone().serve().unwrap(),
+            second.clone().serve().unwrap(),
+        );
+
+        let second_addr = second.clone().addr();
+        let second_peer = Peer::new(second.clone().id(), second_addr);
+
+        // fill second node with bullshit entries
+        for i in 0..(BUCKET_SIZE - 1) {
+            block_on(RoutingTable::update::<ResponsiveMockPinger>(
+                second.node.table.clone(),
+                generate_peer(Some(Hash::from(i))),
+            ));
+        }
+
+        // store a value in second node
+        let entry = first
+            .node
+            .store
+            .create_new_entry(Value::Data(String::from("hello")));
+
+        assert!(KadNode::store(
+            first.node.clone(),
+            second_peer.clone(),
+            String::from("good morning"),
+            entry
+        )
+        .unwrap());
+
+        // request existing value from peer
+        let res = KadNode::find_value(first.node.clone(), second_peer.clone(), hash("good morning")).unwrap();
+
+        if let FindValueResult::Value(v) = res {
+            assert!(block_on(first.node.store.validate(&second_peer.single_peer(), &v)));
+        } else {
+            panic!("not a value");
+        }
+        
+        
         handle1.abort();
         handle2.abort();
     }

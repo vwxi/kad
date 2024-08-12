@@ -11,6 +11,7 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::sha2::Sha256;
 use rsa::signature::{RandomizedSigner, Verifier};
 use rsa::{RsaPrivateKey, RsaPublicKey};
+use tracing::debug;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
@@ -46,7 +47,11 @@ impl Crypto {
         })
     }
 
-    pub(crate) fn from_file(node_: Weak<KadNode>, priv_file: &str, pub_file: &str) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn from_file(
+        node_: Weak<KadNode>,
+        priv_file: &str,
+        pub_file: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let (priv_path, pub_path) = (Path::new(priv_file), Path::new(pub_file));
         let (private_key, public_key) = (
             RsaPrivateKey::read_pkcs1_pem_file(priv_path)?,
