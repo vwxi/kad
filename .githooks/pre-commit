@@ -1,28 +1,29 @@
-#!/bin/bash
+#!/bin/sh
 
-exe=$(which rustfmt)
+set -eu
 
-if [ -n "$exe" ]
+if ! cargo fmt -- --check --quiet
 then
-    # field separator to the new line
-    IFS=$'\n'
-
-    for line in $(git status -s)
-    do
-        # if added or modified
-        if [[ $line == A* || $line == M* ]]
-        then
-            # check file extension
-            if [[ $line == *.rs ]]
-            then
-                # format file
-                rustfmt $(pwd)/${line:3}
-                # add changes
-                git add $(pwd)/${line:3}
-            fi
-        fi
-    done
-
-else
-    echo "rustfmt was not found"
+    echo "There are some code style issues."
+    echo "Running `cargo fmt` to fix them."
+    if ! cargo fmt
+    then
+        echo "Failed to run `cargo fmt`."
+        exit 1
+    fi
+    exit 1
 fi
+
+if ! cargo clippy --all-targets -- -A clippy::pedantic -D warnings 
+then
+    echo "There are some clippy issues."
+    exit 1
+fi
+# Ignore the `binary_rewrite_test` which takes a minute.
+if ! cargo nextest run --tests  -E 'not test(/.*recomp/)'
+then
+    echo "There are some test issues."
+    exit 1
+fi
+
+exit 0
