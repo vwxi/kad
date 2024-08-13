@@ -25,7 +25,7 @@ pub(crate) use pred_block;
 use crate::store::StoreEntry;
 
 // a peer object with multiple addresses
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub id: Hash,
     pub addresses: Vec<(Addr, usize)>,
@@ -116,6 +116,7 @@ pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
 pub(crate) enum RpcOp {
     Key,
     Ping,
+    GetAddresses(Hash),
     FindNode(Hash),
     FindValue(Hash),
     Store(String, StoreEntry),
@@ -133,6 +134,7 @@ pub(crate) enum RpcResult {
     Key(String),
     Ping,
     Store,
+    GetAddresses(Option<Vec<Addr>>),
     FindNode(Vec<SinglePeer>),
     FindValue(FindValueResult),
 }

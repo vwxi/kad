@@ -25,6 +25,7 @@ pub(crate) const TIMEOUT: u64 = 30;
 pub(crate) trait RpcService {
     async fn key() -> RpcResults;
     async fn ping() -> RpcResults;
+    async fn get_addresses(args: RpcArgs) -> RpcResults;
     async fn store(args: RpcArgs) -> RpcResults;
     async fn find_node(args: RpcArgs) -> RpcResults;
     async fn find_value(args: RpcArgs) -> RpcResults;
@@ -107,6 +108,19 @@ impl RpcService for Service {
     // pings are not identification. we're just seeing if we speak the same language
     async fn ping(self, _: context::Context) -> RpcResults {
         self.node.crypto.results(RpcResult::Ping)
+    }
+
+    // get_addresses will NOT verify any args and will NOT return any signature
+    async fn get_addresses(self, _: context::Context, args: RpcArgs) -> RpcResults {
+        (if let RpcOp::GetAddresses(id) = args.0.op {
+            RpcResult::GetAddresses(if let Some(peer) = RoutingTable::find(self.node.table.clone(), id).await {
+                Some(peer.addresses.iter().map(|a| a.0).collect())
+            } else {
+                None
+            })
+        } else {
+            RpcResult::Bad
+        }, String::new())
     }
 
     async fn store(self, _: context::Context, args: RpcArgs) -> RpcResults {
@@ -341,7 +355,7 @@ impl Network for KadNetwork {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        node::{Kad, KadNode, ResponsiveMockPinger},
+        node::{Kad, KadNode, RealPinger, ResponsiveMockPinger},
         routing::{RoutingTable, BUCKET_SIZE},
         store::Value,
         util::{generate_peer, hash, FindValueResult, Hash, Peer},
@@ -381,6 +395,33 @@ mod tests {
 
     #[traced_test]
     #[test]
+    fn get_addresses() {
+        let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
+        let (handle1, handle2) = (
+            first.clone().serve().unwrap(),
+            second.clone().serve().unwrap(),
+        );
+
+        let second_addr = second.clone().addr();
+        let second_peer = Peer::new(second.clone().id(), second_addr);
+
+        // add addresses
+        for _ in 0..=3 {
+            block_on(RoutingTable::update::<RealPinger>(second.node.table.clone(), generate_peer(Some(Hash::from(1)))));
+        }
+
+        let reference = block_on(RoutingTable::find(second.node.table.clone(), Hash::from(1))).unwrap();
+
+        let res = first.node.clone().get_addresses(second_peer, Hash::from(1)).unwrap();
+
+        assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
+
+        handle1.abort();
+        handle2.abort();
+    }
+
+    #[traced_test]
+    #[test]
     fn store() {
         let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
         let (handle1, handle2) = (
@@ -396,8 +437,7 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(KadNode::store(
-            first.node.clone(),
+        assert!(first.node.clone().store(
             second_peer.clone(),
             String::from("good morning"),
             entry
@@ -437,7 +477,7 @@ mod tests {
 
         assert!(!reference.is_empty());
 
-        let res = KadNode::find_node(first.node.clone(), second_peer.clone(), to_find).unwrap();
+        let res = first.node.clone().find_node(second_peer.clone(), to_find).unwrap();
 
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
@@ -472,8 +512,7 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(KadNode::store(
-            first.node.clone(),
+        assert!(first.node.clone().store(
             second_peer.clone(),
             String::from("good morning"),
             entry
@@ -481,8 +520,7 @@ mod tests {
         .unwrap());
 
         // request existing value from peer
-        let res = KadNode::find_value(
-            first.node.clone(),
+        let res = first.node.clone().find_value(
             second_peer.clone(),
             hash("good morning"),
         )
@@ -497,8 +535,7 @@ mod tests {
         }
 
         // request nonexisting value from peer
-        let res = KadNode::find_value(
-            first.node.clone(),
+        let res = first.node.clone().find_value(
             second_peer.clone(),
             hash("good AFTERNOON"),
         )

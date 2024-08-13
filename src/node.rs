@@ -45,11 +45,11 @@ impl Kad {
     }
 
     pub fn serve(self: Arc<Self>) -> std::io::Result<JoinHandle<()>> {
-        KadNode::serve(self.runtime.handle(), self.node.clone())
+        self.node.clone().serve()
     }
 
     pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
-        KadNode::ping(self.node.clone(), peer)
+        self.node.clone().ping(peer)
     }
 
     pub fn addr(self: &Arc<Self>) -> Addr {
@@ -74,9 +74,9 @@ macro_rules! kad_fn {
     // without rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(node: Arc<KadNode>, peer: Peer) -> Result<$return_type, SinglePeer> {
+        pub(crate) fn $func(self: Arc<Self>, peer: Peer) -> Result<$return_type, SinglePeer> {
             // hacky
-            let kad = node.kad.upgrade().unwrap();
+            let kad = self.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
@@ -94,7 +94,7 @@ macro_rules! kad_fn {
                     Ok((conn, responding_peer)) => {
                         match conn.client.$func(context::current()).await {
                             Ok(res) => {
-                                $closure(node.clone(), res, responding_peer).await
+                                $closure(self.clone(), res, responding_peer).await
                             },
                             Err(err) => {
                                 debug!("{} operation failed ({:?})", stringify!($func), err);
@@ -114,8 +114,8 @@ macro_rules! kad_fn {
     // with rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(node: Arc<KadNode>, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
-            let kad = node.kad.upgrade().unwrap();
+        pub(crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
+            let kad = self.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
@@ -128,8 +128,8 @@ macro_rules! kad_fn {
 
             let args;
             {
-                let table = node.table.blocking_lock();
-                args = node.crypto.args(table.id, $op($( $arg ),*), node.addr, timestamp());
+                let table = self.table.blocking_lock();
+                args = self.crypto.args(table.id, $op($( $arg ),*), self.addr, timestamp());
             }
 
             let handle = kad.runtime.handle();
@@ -137,11 +137,11 @@ macro_rules! kad_fn {
             handle.block_on(async {
                 match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if dbg!(node.crypto.if_unknown(dbg!(&responding_peer.id), || async {
+                        if dbg!(self.crypto.if_unknown(dbg!(&responding_peer.id), || async {
                             if let Ok((RpcResult::Key(key), _)) = dbg!(conn.client.key(context::current()).await) {
                                 if dbg!(hash(key.as_str())) == dbg!(responding_peer.id) {
                                     debug!("okay faggot");
-                                    dbg!(node.crypto.entry(responding_peer.id, key.as_str()).await)
+                                    dbg!(self.crypto.entry(responding_peer.id, key.as_str()).await)
                                 } else {
                                     debug!("hash mismatch");
                                     false
@@ -153,7 +153,7 @@ macro_rules! kad_fn {
                         }, || true).await) {
                             match conn.client.$func(context::current(), args).await {
                                 Ok(res) => {
-                                    $closure(node.clone(), res, responding_peer).await
+                                    $closure(self.clone(), res, responding_peer).await
                                 },
                                 Err(err) => {
                                     debug!("{} operation failed ({:?})", stringify!($func), err);
@@ -226,11 +226,24 @@ impl KadNode {
         }))
     }
 
-    pub(crate) fn serve(handle: &Handle, node: Arc<KadNode>) -> std::io::Result<JoinHandle<()>> {
-        handle.block_on(KadNetwork::serve(node))
+    pub(crate) fn serve(self: Arc<Self>) -> std::io::Result<JoinHandle<()>> {
+        let kad = self.kad.upgrade().unwrap();
+
+        kad.runtime.handle().block_on(KadNetwork::serve(self))
     }
 
-    // key and ping do not update routing table
+    pub(crate) fn resolve(self: Arc<Self>, id: Hash) -> Peer {
+        let kad = self.kad.upgrade().unwrap();
+        let handle = kad.runtime.handle();
+
+        if let Some(peer) = handle.block_on(RoutingTable::find(self.table.clone(), id)) {
+            peer
+        } else {
+            todo!("impl lookup_nodes -> get_addresses");
+        }
+    }
+
+    // key, get_addresses and ping do not update routing table
 
     kad_fn!(
         key,
@@ -255,6 +268,20 @@ impl KadNode {
     );
 
     kad_fn!(
+        get_addresses,
+        |id: Hash| RpcOp::GetAddresses(id),
+        Vec<Addr>,
+        |_: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
+            if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
+                Ok(addrs)
+            } else {
+                Err(resp)
+            }
+        },
+        (id: Hash)
+    );
+
+    kad_fn!(
         ping,
         RpcOp::Ping,
         SinglePeer,
@@ -267,7 +294,7 @@ impl KadNode {
         }
     );
 
-    // get_addresses, find_node, find_value and store will update the routing table
+    // find_node, find_value and store will update the routing table
 
     kad_fn!(
         store,
@@ -333,7 +360,7 @@ impl KadNode {
 pub(crate) trait Pinger {
     // this function only exists to facilitate easier test mocking
     fn ping_peer(node: Arc<KadNode>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
-        tokio::task::block_in_place(|| KadNode::ping(node, peer))
+        tokio::task::block_in_place(|| node.ping(peer))
     }
 }
 
