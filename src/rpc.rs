@@ -481,15 +481,42 @@ mod tests {
         .unwrap());
 
         // request existing value from peer
-        let res = KadNode::find_value(first.node.clone(), second_peer.clone(), hash("good morning")).unwrap();
+        let res = KadNode::find_value(
+            first.node.clone(),
+            second_peer.clone(),
+            hash("good morning"),
+        )
+        .unwrap();
 
         if let FindValueResult::Value(v) = res {
-            assert!(block_on(first.node.store.validate(&second_peer.single_peer(), &v)));
+            assert!(block_on(
+                first.node.store.validate(&second_peer.single_peer(), &v)
+            ));
         } else {
             panic!("not a value");
         }
-        
-        
+
+        // request nonexisting value from peer
+        let res = KadNode::find_value(
+            first.node.clone(),
+            second_peer.clone(),
+            hash("good AFTERNOON"),
+        )
+        .unwrap();
+
+        if let FindValueResult::Nodes(n) = res {
+            let reference = block_on(RoutingTable::find_bucket(
+                second.node.table.clone(),
+                hash("good AFTERNOON"),
+            ));
+
+            assert!(!reference.is_empty());
+            assert!(!n.is_empty());
+            assert!(reference.iter().zip(n.iter()).all(|(x, y)| x.id == y.id));
+        } else {
+            panic!("not a list of nodes");
+        }
+
         handle1.abort();
         handle2.abort();
     }

@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Weak};
 use tokio::sync::RwLock;
 
+pub(crate) const REPUBLISH_TIME: u64 = 86400;
+
 crate::util::pred_block! {
     #[cfg(test)] {
-        pub(crate) const REPUBLISH_TIME: u64 = 10;
         pub(crate) const REPUBLISH_INTERVAL: usize = 10;
     }
 
     #[cfg(not(test))] {
-        pub(crate) const REPUBLISH_TIME: u64 = 86400;
         pub(crate) const REPUBLISH_INTERVAL: usize = 86400;
     }
 
@@ -93,9 +93,11 @@ impl Store {
         // determine if origin key exists in keyring,
         if node
             .crypto
-            .if_unknown(&entry.0.origin.id, || async {
-                KadNode::key(node.clone(), entry.0.origin.peer()).is_ok()
-            })
+            .if_unknown(
+                &entry.0.origin.id,
+                || async { KadNode::key(node.clone(), entry.0.origin.peer()).is_ok() },
+                || false,
+            )
             .await
         {
             // return if unable to acquire
@@ -105,9 +107,11 @@ impl Store {
         // determine if sender key exists in keyring,
         if node
             .crypto
-            .if_unknown(&sender.id, || async {
-                KadNode::key(node.clone(), sender.peer()).is_ok()
-            })
+            .if_unknown(
+                &sender.id,
+                || async { KadNode::key(node.clone(), sender.peer()).is_ok() },
+                || false,
+            )
             .await
         {
             // return if unable to acquire

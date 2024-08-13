@@ -11,7 +11,6 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::sha2::Sha256;
 use rsa::signature::{RandomizedSigner, Verifier};
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use tracing::debug;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
@@ -163,17 +162,25 @@ impl Crypto {
         keyring.remove(id);
     }
 
-    pub(crate) async fn if_unknown<F>(&self, id: &Hash, f: impl FnOnce() -> F) -> bool
+    pub(crate) async fn if_unknown<F>(
+        &self,
+        id: &Hash,
+        f: impl FnOnce() -> F,
+        g: impl FnOnce() -> bool,
+    ) -> bool
     where
         F: Future<Output = bool>,
     {
         let keyring = self.keyring.read().await;
 
         if !keyring.contains_key(id) {
+            // do something if doesn't contain key
             drop(keyring);
             f().await
         } else {
-            false
+            // do something if contains key
+            drop(keyring);
+            g()
         }
     }
 

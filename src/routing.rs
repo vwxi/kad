@@ -676,7 +676,7 @@ mod tests {
 
         block_on(RoutingTable::update::<UnresponsiveMockPinger>(
             table.clone(),
-            to_stale.clone(),
+            to_stale,
         ));
 
         // insert far nodes
@@ -699,7 +699,7 @@ mod tests {
         for _ in 0..=(MISSED_PINGS_ALLOWED + 1) {
             block_on(RoutingTable::update::<UnresponsiveMockPinger>(
                 table.clone(),
-                to_stale.clone(),
+                to_stale,
             ));
         }
 

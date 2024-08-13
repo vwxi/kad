@@ -3,7 +3,10 @@ use crate::{
     routing::{RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
     store::{Store, StoreEntry},
-    util::{hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults, SinglePeer},
+    util::{
+        hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
+        SinglePeer,
+    },
 };
 use bigint::U256;
 use futures::executor::block_on;
@@ -134,17 +137,20 @@ macro_rules! kad_fn {
             handle.block_on(async {
                 match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if node.crypto.if_unknown(&responding_peer.id, || async {
-                            if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
-                                if hash(key.as_str()) == responding_peer.id {
-                                    node.crypto.entry(responding_peer.id, key.as_str()).await
+                        if dbg!(node.crypto.if_unknown(dbg!(&responding_peer.id), || async {
+                            if let Ok((RpcResult::Key(key), _)) = dbg!(conn.client.key(context::current()).await) {
+                                if dbg!(hash(key.as_str())) == dbg!(responding_peer.id) {
+                                    debug!("okay faggot");
+                                    dbg!(node.crypto.entry(responding_peer.id, key.as_str()).await)
                                 } else {
+                                    debug!("hash mismatch");
                                     false
                                 }
                             } else {
+                                debug!("incorrect message back");
                                 false
                             }
-                        }).await {
+                        }, || true).await) {
                             match conn.client.$func(context::current(), args).await {
                                 Ok(res) => {
                                     $closure(node.clone(), res, responding_peer).await
@@ -199,9 +205,9 @@ impl KadNode {
         );
 
         Ok(Arc::new_cyclic(|gadget| {
-            let c = Crypto::new(gadget.clone()).unwrap();    
+            let c = Crypto::new(gadget.clone()).unwrap();
             let id = hash(c.public_key_as_string().unwrap().as_str());
-            
+
             let kn = KadNode {
                 addr: a,
                 table: RoutingTable::new(id, gadget.clone()),
@@ -311,7 +317,7 @@ impl KadNode {
             if let RpcResult::FindValue(result) = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
-                    
+
                     Ok(result)
                 } else {
                     Err(resp)
@@ -327,7 +333,7 @@ impl KadNode {
 pub(crate) trait Pinger {
     // this function only exists to facilitate easier test mocking
     fn ping_peer(node: Arc<KadNode>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
-        KadNode::ping(node, peer)
+        tokio::task::block_in_place(|| KadNode::ping(node, peer))
     }
 }
 
