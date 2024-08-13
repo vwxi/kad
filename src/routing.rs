@@ -237,6 +237,25 @@ impl RoutingTable {
         }
     }
 
+    pub(crate) async fn find_alpha_peers(table: TableRef, id: Hash) -> Vec<Peer> {
+        let lock = table.lock().await;
+        let root = lock.root.as_ref().unwrap();
+
+        if let Some(trie) = Self::traverse(Some(root.clone()), id, 0).await {
+            let lock = trie.lock().await;
+
+            if let Some(bucket) = &lock.bucket {
+                let mut bkt = bucket.peers.clone();
+                bkt.truncate(ALPHA);
+                bkt
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    }
+
     pub(crate) async fn update<P: Pinger>(table: TableRef, peer: SinglePeer) {
         let n;
         {

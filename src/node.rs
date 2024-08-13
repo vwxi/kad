@@ -137,20 +137,17 @@ macro_rules! kad_fn {
             handle.block_on(async {
                 match KadNetwork::connect_peer(kad.clone(), peer).await {
                     Ok((conn, responding_peer)) => {
-                        if dbg!(self.crypto.if_unknown(dbg!(&responding_peer.id), || async {
-                            if let Ok((RpcResult::Key(key), _)) = dbg!(conn.client.key(context::current()).await) {
-                                if dbg!(hash(key.as_str())) == dbg!(responding_peer.id) {
-                                    debug!("okay faggot");
-                                    dbg!(self.crypto.entry(responding_peer.id, key.as_str()).await)
+                        if self.crypto.if_unknown(&responding_peer.id, || async {
+                            if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
+                                if hash(key.as_str()) == responding_peer.id {
+                                    self.crypto.entry(responding_peer.id, key.as_str()).await
                                 } else {
-                                    debug!("hash mismatch");
                                     false
                                 }
                             } else {
-                                debug!("incorrect message back");
                                 false
                             }
-                        }, || true).await) {
+                        }, || true).await {
                             match conn.client.$func(context::current(), args).await {
                                 Ok(res) => {
                                     $closure(self.clone(), res, responding_peer).await
