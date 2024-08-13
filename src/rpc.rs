@@ -112,15 +112,20 @@ impl RpcService for Service {
 
     // get_addresses will NOT verify any args and will NOT return any signature
     async fn get_addresses(self, _: context::Context, args: RpcArgs) -> RpcResults {
-        (if let RpcOp::GetAddresses(id) = args.0.op {
-            RpcResult::GetAddresses(if let Some(peer) = RoutingTable::find(self.node.table.clone(), id).await {
-                Some(peer.addresses.iter().map(|a| a.0).collect())
+        (
+            if let RpcOp::GetAddresses(id) = args.0.op {
+                RpcResult::GetAddresses(
+                    if let Some(peer) = RoutingTable::find(self.node.table.clone(), id).await {
+                        Some(peer.addresses.iter().map(|a| a.0).collect())
+                    } else {
+                        None
+                    },
+                )
             } else {
-                None
-            })
-        } else {
-            RpcResult::Bad
-        }, String::new())
+                RpcResult::Bad
+            },
+            String::new(),
+        )
     }
 
     async fn store(self, _: context::Context, args: RpcArgs) -> RpcResults {
@@ -407,12 +412,20 @@ mod tests {
 
         // add addresses
         for _ in 0..=3 {
-            block_on(RoutingTable::update::<RealPinger>(second.node.table.clone(), generate_peer(Some(Hash::from(1)))));
+            block_on(RoutingTable::update::<RealPinger>(
+                second.node.table.clone(),
+                generate_peer(Some(Hash::from(1))),
+            ));
         }
 
-        let reference = block_on(RoutingTable::find(second.node.table.clone(), Hash::from(1))).unwrap();
+        let reference =
+            block_on(RoutingTable::find(second.node.table.clone(), Hash::from(1))).unwrap();
 
-        let res = first.node.clone().get_addresses(second_peer, Hash::from(1)).unwrap();
+        let res = first
+            .node
+            .clone()
+            .get_addresses(second_peer, Hash::from(1))
+            .unwrap();
 
         assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
 
@@ -437,12 +450,11 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(first.node.clone().store(
-            second_peer.clone(),
-            String::from("good morning"),
-            entry
-        )
-        .unwrap());
+        assert!(first
+            .node
+            .clone()
+            .store(second_peer.clone(), String::from("good morning"), entry)
+            .unwrap());
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
         handle1.abort();
@@ -477,7 +489,11 @@ mod tests {
 
         assert!(!reference.is_empty());
 
-        let res = first.node.clone().find_node(second_peer.clone(), to_find).unwrap();
+        let res = first
+            .node
+            .clone()
+            .find_node(second_peer.clone(), to_find)
+            .unwrap();
 
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
@@ -512,19 +528,18 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(first.node.clone().store(
-            second_peer.clone(),
-            String::from("good morning"),
-            entry
-        )
-        .unwrap());
+        assert!(first
+            .node
+            .clone()
+            .store(second_peer.clone(), String::from("good morning"), entry)
+            .unwrap());
 
         // request existing value from peer
-        let res = first.node.clone().find_value(
-            second_peer.clone(),
-            hash("good morning"),
-        )
-        .unwrap();
+        let res = first
+            .node
+            .clone()
+            .find_value(second_peer.clone(), hash("good morning"))
+            .unwrap();
 
         if let FindValueResult::Value(v) = res {
             assert!(block_on(
@@ -535,11 +550,11 @@ mod tests {
         }
 
         // request nonexisting value from peer
-        let res = first.node.clone().find_value(
-            second_peer.clone(),
-            hash("good AFTERNOON"),
-        )
-        .unwrap();
+        let res = first
+            .node
+            .clone()
+            .find_value(second_peer.clone(), hash("good AFTERNOON"))
+            .unwrap();
 
         if let FindValueResult::Nodes(n) = res {
             let reference = block_on(RoutingTable::find_bucket(
