@@ -16,10 +16,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 use tarpc::context;
-use tokio::{
-    runtime::Runtime,
-    task::JoinHandle,
-};
+use tokio::{runtime::Runtime, task::JoinHandle};
 use tracing::debug;
 
 pub(crate) struct KadNode {
