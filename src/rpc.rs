@@ -19,7 +19,9 @@ use tarpc::{
 use tokio::{task::JoinHandle, time::timeout};
 use tracing::{debug, error};
 
-pub(crate) const TIMEOUT: u64 = 30;
+pub(crate) mod consts {
+    pub(super) const TIMEOUT: u64 = 30;
+}
 
 #[tarpc::service]
 pub(crate) trait RpcService {
@@ -140,7 +142,7 @@ impl RpcService for Service {
 
             self.node
                 .crypto
-                .results(if self.node.store.put(sender, k.as_str(), v).await {
+                .results(if self.node.store.put(sender, k, v).await {
                     RpcResult::Store
                 } else {
                     RpcResult::Bad
@@ -260,11 +262,11 @@ pub(crate) trait Network {
     async fn serve(node_: Arc<KadNode>) -> std::io::Result<JoinHandle<()>> {
         let addr = node_.addr;
 
-        match tarpc::serde_transport::tcp::listen(&addr, Json::default).await {
+        match tarpc::serde_transport::tcp::listen(&addr.to(), Json::default).await {
             Ok(mut listener) => Ok(tokio::spawn(async move {
                 listener.config_mut().max_frame_length(usize::MAX);
 
-                debug!("now listening for calls at {:?}:{}", addr.0, addr.1);
+                debug!("now listening for calls at {:?}", addr);
 
                 listener
                     .filter_map(|r| future::ready(r.ok()))
@@ -292,7 +294,8 @@ pub(crate) trait Network {
     }
 
     async fn connect(kad: Arc<Kad>, addr: Addr) -> Result<Service, Box<dyn Error>> {
-        let mut transport = tarpc::serde_transport::tcp::connect(&addr, Json::default);
+        let to = addr.to();
+        let mut transport = tarpc::serde_transport::tcp::connect(&to, Json::default);
         transport.config_mut().max_frame_length(usize::MAX);
 
         let i = transport.await?;
@@ -326,7 +329,7 @@ pub(crate) trait Network {
                     last_addr = current.0;
 
                     if let Ok(Ok(service)) = timeout(
-                        Duration::from_secs(TIMEOUT),
+                        Duration::from_secs(consts::TIMEOUT),
                         Self::connect(kad.clone(), current.0),
                     )
                     .await
@@ -361,7 +364,7 @@ impl Network for KadNetwork {}
 mod tests {
     use crate::{
         node::{Kad, KadNode, RealPinger, ResponsiveMockPinger},
-        routing::{RoutingTable, BUCKET_SIZE},
+        routing::{consts::BUCKET_SIZE, RoutingTable},
         store::Value,
         util::{generate_peer, hash, FindValueResult, Hash, Peer},
     };
@@ -425,7 +428,8 @@ mod tests {
             .node
             .clone()
             .get_addresses(second_peer, Hash::from(1))
-            .unwrap();
+            .unwrap()
+            .0;
 
         assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
 
@@ -450,11 +454,14 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(first
-            .node
-            .clone()
-            .store(second_peer.clone(), String::from("good morning"), entry)
-            .unwrap());
+        assert!(
+            first
+                .node
+                .clone()
+                .store(second_peer.clone(), hash("good morning"), entry)
+                .unwrap()
+                .0
+        );
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
         handle1.abort();
@@ -493,7 +500,8 @@ mod tests {
             .node
             .clone()
             .find_node(second_peer.clone(), to_find)
-            .unwrap();
+            .unwrap()
+            .0;
 
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
@@ -528,18 +536,22 @@ mod tests {
             .store
             .create_new_entry(Value::Data(String::from("hello")));
 
-        assert!(first
-            .node
-            .clone()
-            .store(second_peer.clone(), String::from("good morning"), entry)
-            .unwrap());
+        assert!(
+            first
+                .node
+                .clone()
+                .store(second_peer.clone(), hash("good morning"), entry)
+                .unwrap()
+                .0
+        );
 
         // request existing value from peer
         let res = first
             .node
             .clone()
             .find_value(second_peer.clone(), hash("good morning"))
-            .unwrap();
+            .unwrap()
+            .0;
 
         if let FindValueResult::Value(v) = res {
             assert!(block_on(
@@ -554,7 +566,8 @@ mod tests {
             .node
             .clone()
             .find_value(second_peer.clone(), hash("good AFTERNOON"))
-            .unwrap();
+            .unwrap()
+            .0;
 
         if let FindValueResult::Nodes(n) = res {
             let reference = block_on(RoutingTable::find_bucket(

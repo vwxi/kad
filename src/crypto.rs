@@ -17,8 +17,10 @@ use std::path::Path;
 use std::sync::Weak;
 use tokio::sync::RwLock;
 
-pub(crate) const KEY_BITS: usize = 2048;
-pub(crate) const MAX_KEYS: usize = 64;
+pub(crate) mod consts {
+    pub(crate) const KEY_BITS: usize = 2048;
+    pub(crate) const MAX_KEYS: usize = 64;
+}
 
 pub(crate) struct Crypto {
     pub(crate) private: RsaPrivateKey,
@@ -34,7 +36,7 @@ impl Crypto {
     // randomly generate key
     pub(crate) fn new(node_: Weak<KadNode>) -> Result<Self, Box<dyn Error>> {
         let mut rng = rand::thread_rng();
-        let private_key = RsaPrivateKey::new(&mut rng, KEY_BITS)?;
+        let private_key = RsaPrivateKey::new(&mut rng, consts::KEY_BITS)?;
         let public_key = RsaPublicKey::from(private_key.clone());
 
         Ok(Crypto {
@@ -129,7 +131,7 @@ impl Crypto {
             let mut keyring = self.keyring.write().await;
             keyring.insert(id, (pub_key, timestamp()));
 
-            if keyring.len() > MAX_KEYS {
+            if keyring.len() > consts::MAX_KEYS {
                 // prune oldest key that isn't own key
 
                 let own_id;

@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{
     net::{IpAddr, Ipv4Addr},
     num::ParseIntError,
@@ -8,7 +9,8 @@ use bigint::uint::U256;
 use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
-pub type Addr = (IpAddr, u16);
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Addr(pub IpAddr, pub u16);
 pub type Hash = U256;
 
 macro_rules! pred_block {
@@ -22,6 +24,18 @@ macro_rules! pred_block {
 
 pub(crate) use pred_block;
 
+impl Addr {
+    pub(crate) fn to(&self) -> (IpAddr, u16) {
+        (self.0, self.1)
+    }
+}
+
+impl fmt::Debug for Addr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
+    }
+}
+
 use crate::store::StoreEntry;
 
 // a peer object with multiple addresses
@@ -30,6 +44,25 @@ pub struct Peer {
     pub id: Hash,
     pub addresses: Vec<(Addr, usize)>,
 }
+
+impl std::hash::Hash for Peer {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        let mut temp: Vec<u8> = Vec::with_capacity(32);
+        self.id.to_little_endian(&mut temp[..]);
+        state.write(&temp[..]);
+    }
+}
+
+impl PartialEq for Peer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.addresses.iter().any(|x| other.addresses.contains(x))
+    }
+}
+
+impl Eq for Peer {}
 
 impl Peer {
     #[must_use]
@@ -42,7 +75,7 @@ impl Peer {
 
     #[must_use]
     pub fn single_peer(&self) -> SinglePeer {
-        let nothing: Addr = (IpAddr::from(Ipv4Addr::UNSPECIFIED), 0);
+        let nothing: Addr = Addr(IpAddr::from(Ipv4Addr::UNSPECIFIED), 0);
 
         SinglePeer {
             id: self.id,
@@ -56,7 +89,7 @@ impl Peer {
 }
 
 // a peer object with a single address
-#[derive(Debug, Copy, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Hash, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct SinglePeer {
     pub id: Hash,
     pub addr: Addr,
@@ -108,7 +141,7 @@ pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
             let i = (0..32u8).map(|_| rand::random::<u8>()).collect::<Vec<_>>();
             Hash::from(&i[..])
         },
-        addr: (IpAddr::V4(Ipv4Addr::LOCALHOST), rand::random()),
+        addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), rand::random()),
     }
 }
 
@@ -119,11 +152,12 @@ pub(crate) enum RpcOp {
     GetAddresses(Hash),
     FindNode(Hash),
     FindValue(Hash),
-    Store(String, StoreEntry),
+    Store(Hash, StoreEntry),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum FindValueResult {
+    None,
     Value(StoreEntry),
     Nodes(Vec<SinglePeer>),
 }

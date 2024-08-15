@@ -1,6 +1,6 @@
 use crate::{
     node::KadNode,
-    util::{hash, timestamp, Hash, SinglePeer},
+    util::{timestamp, Hash, SinglePeer},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Weak};
@@ -8,15 +8,19 @@ use tokio::sync::RwLock;
 
 pub(crate) const REPUBLISH_TIME: u64 = 86400;
 
+pub(crate) mod consts {
+    crate::util::pred_block! {
+        #[cfg(test)] {
+            pub(super) const REPUBLISH_INTERVAL: usize = 10;
+        }
+
+        #[cfg(not(test))] {
+            pub(super) const REPUBLISH_INTERVAL: usize = 86400;
+        }
+    }
+}
+
 crate::util::pred_block! {
-    #[cfg(test)] {
-        pub(crate) const REPUBLISH_INTERVAL: usize = 10;
-    }
-
-    #[cfg(not(test))] {
-        pub(crate) const REPUBLISH_INTERVAL: usize = 86400;
-    }
-
     #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)] {
         pub(crate) struct ProviderRecord {
             pub(crate) provider: Hash,
@@ -165,14 +169,14 @@ impl Store {
         true
     }
 
-    pub(crate) async fn put(&self, sender: SinglePeer, key: &str, entry: StoreEntry) -> bool {
+    pub(crate) async fn put(&self, sender: SinglePeer, key: Hash, entry: StoreEntry) -> bool {
         if !self.validate(&sender, &entry).await {
             return false;
         }
 
         // add to hash table
         let mut lock = self.store.write().await;
-        lock.insert(hash(key), entry);
+        lock.insert(key, entry);
 
         true
     }
@@ -193,7 +197,7 @@ mod tests {
     use crate::{
         node::Kad,
         store::{ProviderRecord, Value, REPUBLISH_TIME},
-        util::{timestamp, Hash},
+        util::{hash, timestamp, Hash},
     };
 
     #[traced_test]
@@ -207,7 +211,7 @@ mod tests {
 
         assert!(block_on(kad.node.store.put(
             kad.as_single_peer(),
-            "good morning",
+            hash("good morning"),
             entry
         )));
     }
@@ -227,7 +231,7 @@ mod tests {
 
         assert!(!block_on(kad.node.store.put(
             kad.as_single_peer(),
-            "good morning",
+            hash("good morning"),
             entry
         )));
 
@@ -241,7 +245,7 @@ mod tests {
 
         assert!(!block_on(kad.node.store.put(
             kad.as_single_peer(),
-            "good morning",
+            hash("good morning"),
             entry
         )));
 
@@ -256,7 +260,7 @@ mod tests {
 
         assert!(!block_on(kad.node.store.put(
             kad.as_single_peer(),
-            "good morning",
+            hash("good morning"),
             entry
         )));
     }

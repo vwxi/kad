@@ -78,7 +78,7 @@ macro_rules! kad_fn {
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
                     id: U256::from(0),
-                    addr: (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                    addr: Addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
 
                 return Err(nothing);
@@ -111,13 +111,13 @@ macro_rules! kad_fn {
     // with rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<$return_type, SinglePeer> {
+        pub(crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<($return_type, SinglePeer), SinglePeer> {
             let kad = self.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
                 let nothing = SinglePeer {
                     id: U256::from(0),
-                    addr: (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                    addr: Addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
 
                 return Err(nothing);
@@ -203,7 +203,7 @@ impl KadNode {
             let id = hash(c.public_key_as_string().unwrap().as_str());
 
             let kn = KadNode {
-                addr: a,
+                addr: Addr(a.0, a.1),
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
@@ -224,17 +224,6 @@ impl KadNode {
         let kad = self.kad.upgrade().unwrap();
 
         kad.runtime.handle().block_on(KadNetwork::serve(self))
-    }
-
-    pub(crate) fn resolve(self: Arc<Self>, id: Hash) -> Peer {
-        let kad = self.kad.upgrade().unwrap();
-        let handle = kad.runtime.handle();
-
-        if let Some(peer) = handle.block_on(RoutingTable::find(self.table.clone(), id)) {
-            peer
-        } else {
-            todo!("impl lookup_nodes -> get_addresses");
-        }
     }
 
     // key, get_addresses and ping do not update routing table
@@ -267,7 +256,7 @@ impl KadNode {
         Vec<Addr>,
         |_: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
-                Ok(addrs)
+                Ok((addrs, resp))
             } else {
                 Err(resp)
             }
@@ -292,22 +281,22 @@ impl KadNode {
 
     kad_fn!(
         store,
-        |key: String, entry: StoreEntry| RpcOp::Store(key, entry),
+        |key: Hash, entry: StoreEntry| RpcOp::Store(key, entry),
         bool,
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Store = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
 
-                    Ok(true)
+                    Ok((true, resp))
                 } else {
                     Err(resp)
                 }
             } else {
-                Ok(false)
+                Ok((false, resp))
             }
         },
-        (key: String, entry: StoreEntry)
+        (key: Hash, entry: StoreEntry)
     );
 
     kad_fn!(
@@ -319,7 +308,7 @@ impl KadNode {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
 
-                    Ok(peers)
+                    Ok((peers, resp))
                 } else {
                     Err(resp)
                 }
@@ -339,7 +328,7 @@ impl KadNode {
                 if node.crypto.verify_results(&resp.id, &res).await {
                     RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
 
-                    Ok(result)
+                    Ok((result, resp))
                 } else {
                     Err(resp)
                 }
