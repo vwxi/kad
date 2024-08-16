@@ -182,6 +182,7 @@ impl KadNode {
                             if lock.iter().any(|&x| x == peer.id) {
                                 debug!("disjoint: {:#x} already seen, excluding", peer.id);
                                 i = i.saturating_sub(1);
+                                continue;
                             } else {
                                 // otherwise, add to `claimed` list
                                 lock.push(peer.id);
