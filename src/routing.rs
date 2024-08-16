@@ -16,7 +16,7 @@ pub(crate) mod consts {
 
     crate::util::pred_block! {
         #[cfg(test)] {
-            pub(crate) const BUCKET_SIZE: usize = 3;
+            pub(crate) const BUCKET_SIZE: usize = 5;
             pub(crate) const KEY_SIZE: usize = 64;
             pub(crate) const REFRESH_TIME: u64 = 5;
             pub(crate) const REFRESH_INTERVAL: usize = 10;

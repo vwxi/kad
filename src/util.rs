@@ -155,7 +155,7 @@ pub(crate) enum RpcOp {
     Store(Hash, StoreEntry),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FindValueResult {
     None,
     Value(StoreEntry),

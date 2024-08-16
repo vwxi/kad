@@ -23,7 +23,11 @@ pub(crate) mod consts {
 
 impl KadNode {
     // xlattice-style lookup
-    async fn lookup_nodes(self: Arc<Self>, mut shortlist: VecDeque<Peer>, key: Hash) -> Vec<Peer> {
+    pub(crate) async fn lookup_nodes(
+        self: Arc<Self>,
+        mut shortlist: VecDeque<Peer>,
+        key: Hash,
+    ) -> Vec<Peer> {
         // own id
         let id = self.table.lock().await.id;
         // all valid contacted peers
@@ -102,7 +106,7 @@ impl KadNode {
     }
 
     // libp2p-style value retrieval
-    async fn lookup_value(
+    pub(crate) async fn lookup_value(
         self: Arc<Self>,
         mut pn: Vec<Peer>,
         claimed: Option<Arc<Mutex<Vec<Hash>>>>,
@@ -152,12 +156,11 @@ impl KadNode {
                 debug!("quorum satisfied, updating outdated nodes");
 
                 if let FindValueResult::Value(ref v) = best {
-                    let entry = self.store.forward_entry(v.clone());
-
+                    // don't forward entry, let's just store what was acquired
                     tokio::task::block_in_place(|| {
                         let _ = po.iter().map(|p| {
                             debug!("storing best value at {:#x}", p.id);
-                            let _ = self.clone().store(p.peer(), key, entry.clone());
+                            let _ = self.clone().store(p.peer(), key, v.clone());
                         });
                     });
                 }
@@ -255,8 +258,6 @@ impl KadNode {
                             FindValueResult::Value(value) => {
                                 debug!("received value");
 
-                                found_count.fetch_add(1, Ordering::Relaxed);
-
                                 match best {
                                     // if this is the first value seen,
                                     // store it in `best` and store peer in `pb`
@@ -286,6 +287,8 @@ impl KadNode {
                                                     pb.clear();
                                                     best = FindValueResult::Value(value);
                                                     pb.push(peer);
+
+                                                    found_count.fetch_add(1, Ordering::Relaxed);
                                                 } else {
                                                     // value loses, add current peer to `po`
                                                     debug!("new value lost, adding peer to po");
@@ -297,6 +300,8 @@ impl KadNode {
                                                 if self.store.validate(&peer, &value).await {
                                                     debug!("new value is equal to best value, adding to pb");
                                                     pb.push(peer);
+
+                                                    found_count.fetch_add(1, Ordering::Relaxed);
                                                 } else {
                                                     debug!("new value is equal and has lost, adding peer to po");
                                                     po.push(peer);
@@ -310,9 +315,9 @@ impl KadNode {
                                         }
                                     }
 
-                                    // this should ever reach
+                                    // this should never reach
                                     FindValueResult::Nodes(_) => {
-                                        panic!("best node should not be a node list");
+                                        panic!("best value should not be a node list");
                                     }
                                 }
                             }
@@ -379,5 +384,115 @@ impl KadNode {
         }
 
         paths
+    }
+
+    pub(crate) async fn iter_find_node(self: Arc<Self>, key: Hash) -> Vec<Peer> {
+        let shortlist: VecDeque<Peer> =
+            VecDeque::from(RoutingTable::find_alpha_peers(self.table.clone(), key).await);
+
+        self.lookup_nodes(shortlist, key).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        node::Kad,
+        routing::RoutingTable,
+        util::{FindValueResult, Hash},
+    };
+    use futures::{executor::block_on, future::join_all};
+    use std::sync::Arc;
+    use tracing_test::traced_test;
+    use tracing::debug;
+
+    fn setup(offset: u16) -> (Vec<Arc<Kad>>, Vec<tokio::task::JoinHandle<()>>) {
+        let nodes: Vec<Arc<Kad>> = (0..5).map(|i| Kad::new(offset + i, false, true)).collect();
+        let handles: Vec<_> = nodes.iter().map(|x| x.clone().serve().unwrap()).collect();
+
+        // send find_nodes in this sequence:
+        // A -> B
+        let _ = nodes[0]
+            .node
+            .clone()
+            .find_node(nodes[1].as_single_peer().peer(), Hash::from(1));
+        debug!("A -> B");
+        // A -> C
+        let _ = nodes[0]
+            .node
+            .clone()
+            .find_node(nodes[2].as_single_peer().peer(), Hash::from(1));
+        debug!("A -> C");
+        // C -> A
+        let _ = nodes[2]
+            .node
+            .clone()
+            .find_node(nodes[0].as_single_peer().peer(), Hash::from(1));
+        debug!("C -> A");
+        // B -> D
+        let _ = nodes[1]
+            .node
+            .clone()
+            .find_node(nodes[3].as_single_peer().peer(), Hash::from(1));
+        debug!("B -> D");
+        // D -> A
+        let _ = nodes[3]
+            .node
+            .clone()
+            .find_node(nodes[0].as_single_peer().peer(), Hash::from(1));
+        debug!("D -> A");
+
+        (nodes, handles)
+    }
+
+    mod lookup_nodes {
+        use super::*;
+
+        #[traced_test]
+        #[test]
+        fn find_all_nodes() {
+            let (nodes, handles) = setup(17000);
+
+            // call as C to get A, B and D
+            let res = block_on(nodes[2].node.clone().iter_find_node(Hash::from(1)));
+
+            assert!(!res.is_empty());
+            assert!(res
+                .iter()
+                .all(|x| x.id == nodes[0].id() || x.id == nodes[1].id() || x.id == nodes[3].id()));
+
+            block_on(join_all(handles));
+        }
+    }
+
+    mod lookup_value {
+        use super::*;
+
+        #[traced_test]
+        #[test]
+        fn varying_values() {
+            let (nodes, handles) = setup(17010);
+
+            let shortlist = block_on(RoutingTable::find_alpha_peers(
+                nodes[1].node.table.clone(),
+                Hash::from(1),
+            ));
+
+            // no values
+            assert_eq!(
+                block_on(
+                    nodes[1]
+                        .node
+                        .clone()
+                        .lookup_value(shortlist, None, Hash::from(1), 2)
+                ),
+                FindValueResult::None,
+                "checking when no values"
+            );
+
+            // 
+
+            block_on(join_all(handles));
+        }
     }
 }
