@@ -114,7 +114,11 @@ impl SinglePeer {
 
 pub fn hash(s: &str) -> Hash {
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_string(s).unwrap().as_bytes());
+    hasher.update(
+        serde_json::to_string(s)
+            .expect("serialization for hashing failed")
+            .as_bytes(),
+    );
 
     Hash::from_little_endian(hasher.finalize().as_mut_slice())
 }
@@ -151,13 +155,13 @@ pub(crate) enum RpcOp {
     GetAddresses(Hash),
     FindNode(Hash),
     FindValue(Hash),
-    Store(Hash, StoreEntry),
+    Store(Hash, Box<StoreEntry>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FindValueResult {
     None,
-    Value(StoreEntry),
+    Value(Box<StoreEntry>),
     Nodes(Vec<SinglePeer>),
 }
 
@@ -169,7 +173,7 @@ pub(crate) enum RpcResult {
     Store,
     GetAddresses(Option<Vec<Addr>>),
     FindNode(Vec<SinglePeer>),
-    FindValue(FindValueResult),
+    FindValue(Box<FindValueResult>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

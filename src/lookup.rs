@@ -135,12 +135,12 @@ impl KadNode {
         if let Some(val) = self.store.get(&key).await {
             if quorum < 2 {
                 debug!("quorum < 2, found value in local store, search is complete");
-                return FindValueResult::Value(val);
+                return FindValueResult::Value(Box::new(val));
             }
 
             // otherwise, we count it as a found value
             found_count.fetch_add(1, Ordering::Relaxed);
-            best = FindValueResult::Value(val);
+            best = FindValueResult::Value(Box::new(val));
             debug!("found already in local store, counting as a valid result");
         }
 
@@ -160,7 +160,7 @@ impl KadNode {
                     let kad = self.kad.upgrade().unwrap();
                     let handle = kad.runtime.handle();
 
-                    let _ = po.iter().for_each(|p| {
+                    for p in &po {
                         debug!("storing best value at {:#x}", p.id);
 
                         tokio::task::block_in_place(|| {
@@ -168,10 +168,10 @@ impl KadNode {
                                 handle
                                     .block_on(RoutingTable::resolve(self.table.clone(), p.peer())),
                                 key,
-                                self.store.forward_entry(v.clone()),
+                                self.store.forward_entry(*v.clone()),
                             );
                         });
-                    });
+                    }
                 }
 
                 return best;
@@ -215,7 +215,7 @@ impl KadNode {
                                     Ok((result, responding_peer)) => {
                                         (Some(result), responding_peer)
                                     }
-                                    Err(p) => (None, p),
+                                    Err(p) => (None, *p),
                                 }
                             })
                         });
@@ -241,7 +241,7 @@ impl KadNode {
 
                 match task {
                     (Some(result), peer) => {
-                        match result {
+                        match *result {
                             FindValueResult::Nodes(nodes) => {
                                 // if without value, add unqueried closest nodes to `pn`
                                 // ensure node isn't an element of `pq`, `pn` or is self
@@ -355,7 +355,7 @@ impl KadNode {
         key: Hash,
         quorum: usize,
     ) -> FindValueResult {
-        self.lookup_value(portion.to_vec(), Some(claimed.clone()), key, quorum)
+        self.lookup_value(portion.clone(), Some(claimed.clone()), key, quorum)
             .await
     }
 
@@ -475,7 +475,7 @@ mod tests {
                 || x.id == nodes[3].id()
                 || x.id == nodes[4].id()));
 
-            let _ = handles.iter().for_each(JoinHandle::abort);
+            handles.iter().for_each(JoinHandle::abort);
         }
     }
 
@@ -512,7 +512,7 @@ mod tests {
                 let first_entry = nodes[0]
                     .node
                     .store
-                    .create_new_entry(Value::Data(String::from("hello")));
+                    .create_new_entry(&Value::Data(String::from("hello")));
 
                 let _ = nodes[0].node.clone().store(
                     nodes[1].as_peer(),
@@ -532,12 +532,12 @@ mod tests {
                         hash("good morning"),
                         consts::QUORUM
                     )),
-                    FindValueResult::Value(first_entry),
+                    FindValueResult::Value(Box::new(first_entry)),
                     "checking when one value from node D"
                 );
             }
 
-            let _ = handles.iter().for_each(JoinHandle::abort);
+            handles.iter().for_each(JoinHandle::abort);
         }
 
         // intersecting lookup with two valid values
@@ -552,7 +552,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(Value::Data(String::from("hello")));
+                .create_new_entry(&Value::Data(String::from("hello")));
 
             // allow there to be a time difference
             std::thread::sleep(tokio::time::Duration::from_secs(1));
@@ -586,7 +586,7 @@ mod tests {
                     hash("good morning"),
                     consts::QUORUM
                 )),
-                FindValueResult::Value(second_entry.clone()),
+                FindValueResult::Value(Box::new(second_entry.clone())),
                 "checking if the newer of the two values was chosen"
             );
 
@@ -600,7 +600,7 @@ mod tests {
                 "checking if new value was stored in previous node"
             );
 
-            let _ = handles.iter().for_each(JoinHandle::abort);
+            handles.iter().for_each(JoinHandle::abort);
         }
 
         #[traced_test]
@@ -615,7 +615,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(Value::Data(String::from("hello")));
+                .create_new_entry(&Value::Data(String::from("hello")));
 
             assert!(block_on(nodes[1].node.store.put(
                 nodes[0].as_single_peer(),
@@ -678,7 +678,7 @@ mod tests {
                 "checking if C got new value"
             );
 
-            let _ = handles.iter().for_each(JoinHandle::abort);
+            handles.iter().for_each(JoinHandle::abort);
         }
     }
 }

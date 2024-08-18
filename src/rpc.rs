@@ -142,7 +142,7 @@ impl RpcService for Service {
 
             self.node
                 .crypto
-                .results(if self.node.store.put(sender, k, v).await {
+                .results(if self.node.store.put(sender, k, *v).await {
                     RpcResult::Store
                 } else {
                     RpcResult::Bad
@@ -183,12 +183,14 @@ impl RpcService for Service {
             if let Some(e) = self.node.store.get(&id).await {
                 self.node
                     .crypto
-                    .results(RpcResult::FindValue(FindValueResult::Value(e)))
+                    .results(RpcResult::FindValue(Box::new(FindValueResult::Value(
+                        Box::new(e),
+                    ))))
             } else {
                 let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
                 self.node
                     .crypto
-                    .results(RpcResult::FindValue(FindValueResult::Nodes(bkt)))
+                    .results(RpcResult::FindValue(Box::new(FindValueResult::Nodes(bkt))))
             }
         } else {
             self.node.crypto.results(RpcResult::Bad)
@@ -252,7 +254,7 @@ pub(crate) trait Network {
         tokio::spawn(
             channel
                 .forward(transport_sink.sink_map_err(RpcError::IOError))
-                .inspect_ok(|_| {})
+                .inspect_ok(|()| {})
                 .inspect_err(|e| error!("outbound message handle error: {}", e)),
         );
 
@@ -286,7 +288,7 @@ pub(crate) trait Network {
                             })
                     })
                     .buffer_unordered(10)
-                    .for_each(|_| async {})
+                    .for_each(|()| async {})
                     .await;
             })),
             Err(err) => Err(err),
@@ -452,7 +454,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(String::from("hello")));
 
         assert!(
             first
@@ -534,7 +536,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(String::from("hello")));
 
         assert!(
             first
@@ -548,7 +550,7 @@ mod tests {
 
         // request existing value from node
         assert!(
-            if let FindValueResult::Value(v) = first
+            if let FindValueResult::Value(v) = *first
                 .node
                 .clone()
                 .find_value(second_peer.clone(), hash("good morning"))
@@ -570,7 +572,7 @@ mod tests {
             .unwrap()
             .0;
 
-        if let FindValueResult::Nodes(n) = res {
+        if let FindValueResult::Nodes(n) = *res {
             let reference = block_on(RoutingTable::find_bucket(
                 second.node.table.clone(),
                 hash("good AFTERNOON"),

@@ -58,7 +58,7 @@ impl Store {
     }
 
     // create a new entry. use when publishing new entries
-    pub(crate) fn create_new_entry(&self, data: Value) -> StoreEntry {
+    pub(crate) fn create_new_entry(&self, data: &Value) -> StoreEntry {
         let node = self.node.upgrade().unwrap();
         let kad = node.kad.upgrade().unwrap();
 
@@ -213,7 +213,7 @@ mod tests {
         let entry = kad
             .node
             .store
-            .create_new_entry(Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(String::from("hello")));
 
         assert!(block_on(kad.node.store.put(
             kad.as_single_peer(),
@@ -230,7 +230,7 @@ mod tests {
         let mut entry = kad
             .node
             .store
-            .create_new_entry(Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(String::from("hello")));
 
         entry.0.signature = String::from("wlefplwefplwef");
         entry.1 = String::from("wefwefwef");
@@ -245,7 +245,7 @@ mod tests {
         let mut entry = kad
             .node
             .store
-            .create_new_entry(Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(String::from("hello")));
 
         entry.0.timestamp += REPUBLISH_TIME + 1;
 
@@ -259,7 +259,7 @@ mod tests {
         let entry = kad
             .node
             .store
-            .create_new_entry(Value::ProviderRecord(ProviderRecord {
+            .create_new_entry(&Value::ProviderRecord(ProviderRecord {
                 provider: Hash::from(1),
                 expiry: timestamp() - REPUBLISH_TIME,
             }));

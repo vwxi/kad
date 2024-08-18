@@ -10,11 +10,8 @@ use crate::{
     U256,
 };
 use futures::executor::block_on;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Weak};
-use std::{
-    error::Error,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-};
 use tarpc::context;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use tracing::debug;
@@ -33,10 +30,10 @@ pub struct Kad {
 }
 
 impl Kad {
+    #[must_use]
     pub fn new(port: u16, ipv6: bool, local: bool) -> Arc<Self> {
         Arc::new_cyclic(|gadget| Kad {
-            node: KadNode::new(port, ipv6, local, gadget.clone())
-                .expect("could not create KadNode object"),
+            node: KadNode::new(port, ipv6, local, gadget.clone()),
             runtime: Runtime::new().expect("could not create runtime for Kad object"),
         })
     }
@@ -45,7 +42,7 @@ impl Kad {
         self.node.clone().serve()
     }
 
-    pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+    pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         self.node.clone().ping(peer)
     }
 
@@ -75,7 +72,7 @@ macro_rules! kad_fn {
     // without rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(in crate) fn $func(self: Arc<Self>, peer: Peer) -> Result<$return_type, SinglePeer> {
+        pub(in crate) fn $func(self: Arc<Self>, peer: Peer) -> Result<$return_type, Box<SinglePeer>> {
             // hacky
             let kad = self.kad.upgrade().unwrap();
 
@@ -85,7 +82,7 @@ macro_rules! kad_fn {
                     addr: Addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
 
-                return Err(nothing);
+                return Err(Box::new(nothing));
             }
 
             let handle = kad.runtime.handle();
@@ -99,13 +96,13 @@ macro_rules! kad_fn {
                             },
                             Err(err) => {
                                 debug!("{} operation failed ({:?})", stringify!($func), err);
-                                Err(responding_peer)
+                                Err(Box::new(responding_peer))
                             },
                         }
                     }
                     Err(single_peer) => {
                         debug!("could not connect to peer {:?}", single_peer.addr);
-                        Err(single_peer)
+                        Err(Box::new(single_peer))
                     },
                 }
             })
@@ -115,7 +112,7 @@ macro_rules! kad_fn {
     // with rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(in crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<($return_type, SinglePeer), SinglePeer> {
+        pub(in crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<($return_type, SinglePeer), Box<SinglePeer>> {
             let kad = self.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {
@@ -124,7 +121,7 @@ macro_rules! kad_fn {
                     addr: Addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
 
-                return Err(nothing);
+                return Err(Box::new(nothing));
             }
 
             let args;
@@ -155,17 +152,17 @@ macro_rules! kad_fn {
                                 },
                                 Err(err) => {
                                     debug!("{} operation failed ({:?})", stringify!($func), err);
-                                    Err(responding_peer)
+                                    Err(Box::new(responding_peer))
                                 },
                             }
                         } else {
                             debug!("could not acquire key");
-                            Err(responding_peer)
+                            Err(Box::new(responding_peer))
                         }
                     }
                     Err(single_peer) => {
                         debug!("could not connect to peer {:?}", single_peer.addr);
-                        Err(single_peer)
+                        Err(Box::new(single_peer))
                     }
                 }
             })
@@ -181,12 +178,7 @@ macro_rules! kad_fn {
 // TODO: iterative store mechanism
 impl KadNode {
     // TODO: implement non-local forwarding of some sort
-    pub(crate) fn new(
-        port: u16,
-        ipv6: bool,
-        local: bool,
-        k: Weak<Kad>,
-    ) -> Result<Arc<KadNode>, Box<dyn Error>> {
+    pub(crate) fn new(port: u16, ipv6: bool, local: bool, k: Weak<Kad>) -> Arc<KadNode> {
         let a = (
             if ipv6 {
                 if local {
@@ -202,9 +194,13 @@ impl KadNode {
             port,
         );
 
-        Ok(Arc::new_cyclic(|gadget| {
-            let c = Crypto::new(gadget.clone()).unwrap();
-            let id = hash(c.public_key_as_string().unwrap().as_str());
+        Arc::new_cyclic(|gadget| {
+            let c = Crypto::new(gadget.clone()).expect("could not initialize crypto");
+            let id = hash(
+                c.public_key_as_string()
+                    .expect("could not acquire public key for ID hash")
+                    .as_str(),
+            );
 
             let kn = KadNode {
                 addr: Addr(a.0, a.1),
@@ -216,12 +212,17 @@ impl KadNode {
 
             // add own key
             block_on(
-                kn.crypto
-                    .entry(id, kn.crypto.public_key_as_string().unwrap().as_str()),
+                kn.crypto.entry(
+                    id,
+                    kn.crypto
+                        .public_key_as_string()
+                        .expect("could not acquire public key for keyring")
+                        .as_str(),
+                ),
             );
 
             kn
-        }))
+        })
     }
 
     pub(crate) fn serve(self: Arc<Self>) -> std::io::Result<JoinHandle<()>> {
@@ -243,13 +244,13 @@ impl KadNode {
                     if node.crypto.entry(resp.id, result.as_str()).await {
                         Ok(resp)
                     } else {
-                        Err(resp)
+                        Err(Box::new(resp))
                     }
                 } else {
-                    Err(resp)
+                    Err(Box::new(resp))
                 }
             } else {
-                Err(resp)
+                Err(Box::new(resp))
             }
         }
     );
@@ -262,7 +263,7 @@ impl KadNode {
             if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
                 Ok((addrs, resp))
             } else {
-                Err(resp)
+                Err(Box::new(resp))
             }
         },
         (id: Hash)
@@ -276,7 +277,7 @@ impl KadNode {
             if let RpcResult::Ping = res.0 {
                 Ok(resp)
             } else {
-                Err(resp)
+                Err(Box::new(resp))
             }
         }
     );
@@ -285,7 +286,7 @@ impl KadNode {
 
     kad_fn!(
         store,
-        |key: Hash, entry: StoreEntry| RpcOp::Store(key, entry),
+        |key: Hash, entry: StoreEntry| RpcOp::Store(key, Box::new(entry)),
         bool,
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Store = res.0.clone() {
@@ -294,7 +295,7 @@ impl KadNode {
 
                     Ok((true, resp))
                 } else {
-                    Err(resp)
+                    Err(Box::new(resp))
                 }
             } else {
                 Ok((false, resp))
@@ -314,10 +315,10 @@ impl KadNode {
 
                     Ok((peers, resp))
                 } else {
-                    Err(resp)
+                    Err(Box::new(resp))
                 }
             } else {
-                Err(resp)
+                Err(Box::new(resp))
             }
         },
         (id: Hash)
@@ -326,7 +327,7 @@ impl KadNode {
     kad_fn!(
         find_value,
         |id: Hash| RpcOp::FindValue(id),
-        FindValueResult,
+        Box<FindValueResult>,
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::FindValue(result) = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
@@ -334,10 +335,10 @@ impl KadNode {
 
                     Ok((result, resp))
                 } else {
-                    Err(resp)
+                    Err(Box::new(resp))
                 }
             } else {
-                Err(resp)
+                Err(Box::new(resp))
             }
         },
         (id: Hash)
@@ -346,7 +347,7 @@ impl KadNode {
 
 pub(crate) trait Pinger {
     // this function only exists to facilitate easier test mocking
-    fn ping_peer(node: Arc<KadNode>, peer: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(node: Arc<KadNode>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         tokio::task::block_in_place(|| node.ping(peer))
     }
 }
@@ -358,7 +359,7 @@ impl Pinger for RealPinger {}
 #[derive(Default)]
 pub(crate) struct ResponsiveMockPinger {}
 impl Pinger for ResponsiveMockPinger {
-    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, SinglePeer> {
+    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         Ok(SinglePeer {
             id: p.id,
             addr: p.addresses.first().unwrap().0,
@@ -369,10 +370,10 @@ impl Pinger for ResponsiveMockPinger {
 #[derive(Default)]
 pub(crate) struct UnresponsiveMockPinger {}
 impl Pinger for UnresponsiveMockPinger {
-    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, SinglePeer> {
-        Err(SinglePeer {
+    fn ping_peer(_: Arc<KadNode>, p: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
+        Err(Box::new(SinglePeer {
             id: p.id,
             addr: p.addresses.first().unwrap().0,
-        })
+        }))
     }
 }

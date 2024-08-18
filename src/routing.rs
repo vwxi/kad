@@ -115,11 +115,9 @@ impl Bucket {
 
             // sort by liveness
             entry.addresses.sort_by(|x, y| x.1.cmp(&y.1));
-        } else {
-            if self.peers.len() < consts::BUCKET_SIZE {
-                // does not exist in bucket, add
-                self.peers.push(peer.peer());
-            }
+        } else if self.peers.len() < consts::BUCKET_SIZE {
+            // does not exist in bucket, add
+            self.peers.push(peer.peer());
         }
 
         self.last_seen = timestamp();
@@ -262,7 +260,7 @@ impl RoutingTable {
 
     pub(crate) async fn resolve(table: TableRef, mut peer: Peer) -> Peer {
         if let Some(mut res) = Self::find(table, peer.id).await {
-            peer.addresses.append(&mut res.addresses)
+            peer.addresses.append(&mut res.addresses);
         }
 
         peer
@@ -453,6 +451,8 @@ impl RoutingTable {
                 debug!("peer doesnt exist and bucket is not full, adding");
                 bkt.add_peer(peer).await;
             } else if exists {
+                // make sure it is not root node
+                #[allow(clippy::if_not_else)]
                 if nearby != root {
                     // bucket is full but nearby, update node
                     debug!("bucket is full but nearby, update node");
