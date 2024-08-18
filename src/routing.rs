@@ -16,17 +16,17 @@ pub(crate) mod consts {
 
     crate::util::pred_block! {
         #[cfg(test)] {
-            pub(crate) const BUCKET_SIZE: usize = 5;
-            pub(crate) const KEY_SIZE: usize = 64;
-            pub(crate) const REFRESH_TIME: u64 = 5;
-            pub(crate) const REFRESH_INTERVAL: usize = 10;
+            pub(in crate) const BUCKET_SIZE: usize = 5;
+            pub(in crate) const KEY_SIZE: usize = 64;
+            pub(in crate) const REFRESH_TIME: u64 = 5;
+            pub(in crate) const REFRESH_INTERVAL: usize = 10;
         }
 
         #[cfg(not(test))] {
-            pub(crate) const BUCKET_SIZE: usize = 20;
-            pub(crate) const KEY_SIZE: usize = 256;
-            pub(crate) const REFRESH_TIME: u64 = 3600;
-            pub(crate) const REFRESH_INTERVAL: usize = 600;
+            pub(in crate) const BUCKET_SIZE: usize = 20;
+            pub(in crate) const KEY_SIZE: usize = 256;
+            pub(in crate) const REFRESH_TIME: u64 = 3600;
+            pub(in crate) const REFRESH_INTERVAL: usize = 600;
         }
     }
 }
@@ -115,9 +115,11 @@ impl Bucket {
 
             // sort by liveness
             entry.addresses.sort_by(|x, y| x.1.cmp(&y.1));
-        } else if self.peers.len() < consts::BUCKET_SIZE {
-            // does not exist in bucket, add
-            self.peers.push(peer.peer());
+        } else {
+            if self.peers.len() < consts::BUCKET_SIZE {
+                // does not exist in bucket, add
+                self.peers.push(peer.peer());
+            }
         }
 
         self.last_seen = timestamp();
@@ -140,7 +142,7 @@ impl Trie {
         if let Some(bkt) = &self.bucket {
             self.left = Some(Trie::new(self.prefix, self.cutoff + 1, true));
 
-            let new_bit = Hash::from(1usize) << (consts::KEY_SIZE - (self.cutoff + 1));
+            let new_bit = Hash::from(1) << (consts::KEY_SIZE - (self.cutoff + 1));
 
             self.right = Some(Trie::new(self.prefix | new_bit, self.cutoff + 1, true));
 
@@ -193,12 +195,11 @@ impl RoutingTable {
                 return node;
             }
 
-            let next =
-                if key & (Hash::from(1usize) << (consts::KEY_SIZE - cutoff - 1)) == Hash::zero() {
-                    current.left.as_ref().unwrap().clone()
-                } else {
-                    current.right.as_ref().unwrap().clone()
-                };
+            let next = if key & (Hash::from(1) << (consts::KEY_SIZE - cutoff - 1)) == Hash::zero() {
+                current.left.as_ref().unwrap().clone()
+            } else {
+                current.right.as_ref().unwrap().clone()
+            };
 
             drop(current);
             Self::traverse(Some(next.clone()), key, cutoff + 1).await
@@ -445,19 +446,20 @@ impl RoutingTable {
             let exists = bkt.peers.iter().any(|x| x.id == peer.id);
             let fits = bkt.peers.len() < consts::BUCKET_SIZE;
             let nearby = (peer.id & mask) == (table.id & mask);
+            let root = trie.cutoff == 0;
 
             // bucket is not full and peer doesnt exist yet, add to bucket
             if !exists && fits {
                 debug!("peer doesnt exist and bucket is not full, adding");
                 bkt.add_peer(peer).await;
             } else if exists {
-                if nearby {
+                if nearby != root {
                     // bucket is full but nearby, update node
                     debug!("bucket is full but nearby, update node");
                     bkt.update_nearby(peer).await;
                 } else {
                     // node is known to us already but far so ping to check
-                    debug!("bucket is known to us already but far so ping");
+                    debug!("node is known to us already but far so ping");
                     if bkt.peers.is_empty() {
                         return;
                     }

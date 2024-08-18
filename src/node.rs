@@ -7,8 +7,8 @@ use crate::{
         hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
         SinglePeer,
     },
+    U256
 };
-use bigint::U256;
 use futures::executor::block_on;
 use std::sync::{Arc, Weak};
 use std::{
@@ -65,13 +65,17 @@ impl Kad {
             addr: self.node.addr,
         }
     }
+
+    pub(crate) fn as_peer(self: &Arc<Self>) -> Peer {
+        self.as_single_peer().peer()
+    }
 }
 
 macro_rules! kad_fn {
     // without rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(self: Arc<Self>, peer: Peer) -> Result<$return_type, SinglePeer> {
+        pub(in crate) fn $func(self: Arc<Self>, peer: Peer) -> Result<$return_type, SinglePeer> {
             // hacky
             let kad = self.kad.upgrade().unwrap();
 
@@ -111,7 +115,7 @@ macro_rules! kad_fn {
     // with rpc arguments
     ($func:ident, $op:expr, $return_type:ty, $closure:expr, ($($arg:ident : $type:ty),*)) => {
         #[allow(clippy::redundant_closure_call)] // not too sure
-        pub(crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<($return_type, SinglePeer), SinglePeer> {
+        pub(in crate) fn $func(self: Arc<Self>, peer: Peer, $( $arg : $type ),*) -> Result<($return_type, SinglePeer), SinglePeer> {
             let kad = self.kad.upgrade().unwrap();
 
             if peer.addresses.is_empty() {

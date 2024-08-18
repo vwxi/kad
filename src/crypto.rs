@@ -93,17 +93,13 @@ impl Crypto {
     pub(crate) async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
         let keyring = self.keyring.read().await;
 
-        let entry = keyring.get(id).unwrap();
+        let entry = keyring.get(id).expect("hash is not available in keyring");
         let ver_key = VerifyingKey::<Sha256>::new(entry.0.clone());
 
-        if let Ok(s) = decode_hex(sig) {
-            match Signature::try_from(s.as_slice()) {
-                Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
+        decode_hex(sig).map_or(false, |s| match Signature::try_from(s.as_slice()) {
+            Ok(signature) => ver_key.verify(data.as_bytes(), &signature).is_ok(),
+            Err(_) => false,
+        })
     }
 
     pub(crate) fn args(&self, i: Hash, o: RpcOp, a: Addr, ts: u64) -> RpcArgs {
@@ -114,13 +110,21 @@ impl Crypto {
             timestamp: ts,
         };
 
-        let sign = self.sign(serde_json::to_string(&ctx).unwrap().as_str());
+        let sign = self.sign(
+            serde_json::to_string(&ctx)
+                .expect("args serialization failed")
+                .as_str(),
+        );
 
         (ctx, sign)
     }
 
     pub(crate) fn results(&self, res: RpcResult) -> RpcResults {
-        let sign = self.sign(serde_json::to_string(&res).unwrap().as_str());
+        let sign = self.sign(
+            serde_json::to_string(&res)
+                .expect("results serialization failed")
+                .as_str(),
+        );
 
         (res, sign)
     }
@@ -145,7 +149,7 @@ impl Crypto {
                     .iter_mut()
                     .filter(|&(a, &mut (_, _))| *a != own_id)
                     .min_by(|&(_, &mut (_, a)), &(_, &mut (_, b))| a.cmp(&b))
-                    .unwrap()
+                    .expect("key does not exist in keyring")
                     .0
                     .to_owned();
 
@@ -164,31 +168,29 @@ impl Crypto {
         keyring.remove(id);
     }
 
-    pub(crate) async fn if_unknown<F>(
-        &self,
-        id: &Hash,
-        f: impl FnOnce() -> F,
-        g: impl FnOnce() -> bool,
-    ) -> bool
+    pub(crate) async fn if_unknown<F, Ff, Fb>(&self, id: &Hash, f: Ff, g: Fb) -> bool
     where
-        F: Future<Output = bool>,
+        F: Future<Output = bool> + Send,
+        Ff: FnOnce() -> F + Send,
+        Fb: FnOnce() -> bool + Send,
     {
         let keyring = self.keyring.read().await;
 
-        if !keyring.contains_key(id) {
-            // do something if doesn't contain key
-            drop(keyring);
-            f().await
-        } else {
+        if keyring.contains_key(id) {
             // do something if contains key
             drop(keyring);
             g()
+        } else {
+            // do something if doesn't contain key
+            drop(keyring);
+            f().await
         }
     }
 
-    pub(crate) async fn verify_args<F>(&self, args: &RpcArgs, backup: impl FnOnce() -> F) -> bool
+    pub(crate) async fn verify_args<F, Ff>(&self, args: &RpcArgs, backup: Ff) -> bool
     where
-        F: Future<Output = ()>,
+        F: Future<Output = ()> + Send,
+        Ff: FnOnce() -> F + Send,
     {
         let ctx = args.0.clone();
         let keyring = self.keyring.read().await;
@@ -196,7 +198,9 @@ impl Crypto {
         if keyring.contains_key(&ctx.id) {
             self.verify(
                 &args.0.id,
-                serde_json::to_string(&ctx).unwrap().as_str(),
+                serde_json::to_string(&ctx)
+                    .expect("rpc context serialization failed")
+                    .as_str(),
                 &args.1,
             )
             .await
@@ -209,7 +213,9 @@ impl Crypto {
             if keyring.contains_key(&ctx.id) {
                 self.verify(
                     &args.0.id,
-                    serde_json::to_string(&ctx).unwrap().as_str(),
+                    serde_json::to_string(&ctx)
+                        .expect("args serialization failed")
+                        .as_str(),
                     &args.1,
                 )
                 .await
@@ -226,7 +232,9 @@ impl Crypto {
         if keyring.contains_key(id) {
             self.verify(
                 id,
-                serde_json::to_string(&results.0).as_ref().unwrap(),
+                serde_json::to_string(&results.0)
+                    .as_ref()
+                    .expect("results serialization failed"),
                 &results.1,
             )
             .await

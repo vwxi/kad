@@ -335,9 +335,9 @@ pub(crate) trait Network {
                     .await
                     {
                         break Some(service);
-                    } else {
-                        addr.next();
                     }
+
+                    addr.next();
                 }
                 None => break None,
             }
@@ -440,7 +440,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn store() {
-        let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
+        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
         let (handle1, handle2) = (
             first.clone().serve().unwrap(),
             second.clone().serve().unwrap(),
@@ -471,7 +471,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn find_node() {
-        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
+        let (first, second) = (Kad::new(16167, false, true), Kad::new(16168, false, true));
         let (handle1, handle2) = (
             first.clone().serve().unwrap(),
             second.clone().serve().unwrap(),
@@ -513,7 +513,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn find_value() {
-        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
+        let (first, second) = (Kad::new(16169, false, true), Kad::new(16170, false, true));
         let (handle1, handle2) = (
             first.clone().serve().unwrap(),
             second.clone().serve().unwrap(),
@@ -542,26 +542,28 @@ mod tests {
                 .clone()
                 .store(second_peer.clone(), hash("good morning"), entry)
                 .unwrap()
-                .0
+                .0,
+            "check if store was successful"
         );
 
-        // request existing value from peer
-        let res = first
+        // request existing value from node
+        assert!(if let FindValueResult::Value(v) = first
             .node
             .clone()
             .find_value(second_peer.clone(), hash("good morning"))
             .unwrap()
-            .0;
+            .0 
+            {
+                block_on(
+                    first.node.store.validate(&first.as_single_peer(), &v)
+                )
+            } else {
+                false
+            },
+            "check if value exists in stored node"
+        );
 
-        if let FindValueResult::Value(v) = res {
-            assert!(block_on(
-                first.node.store.validate(&second_peer.single_peer(), &v)
-            ));
-        } else {
-            panic!("not a value");
-        }
-
-        // request nonexisting value from peer
+        // request nonexisting value from node
         let res = first
             .node
             .clone()
@@ -575,9 +577,9 @@ mod tests {
                 hash("good AFTERNOON"),
             ));
 
-            assert!(!reference.is_empty());
-            assert!(!n.is_empty());
-            assert!(reference.iter().zip(n.iter()).all(|(x, y)| x.id == y.id));
+            assert!(!reference.is_empty(), "check if local bucket is not empty");
+            assert!(!n.is_empty(), "check if obtained bucket is not empty");
+            assert!(reference.iter().zip(n.iter()).all(|(x, y)| x.id == y.id), "check if obtained bucket matches local bucket");
         } else {
             panic!("not a list of nodes");
         }

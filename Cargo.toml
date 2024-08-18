@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.86"
 async-trait = "0.1.80"
-bigint = { version = "4.4.3", features = ["serde", "serialize"] }
 bincode = "1.3.3"
 futures = "0.3.30"
 rand = "0.8.5"
@@ -19,3 +18,4 @@ tokio-serde = { version = "0.9.0", features = ["json"] }
 tokio-util = { version = "0.7.11", features = ["compat"] }
 tracing = { version = "0.1.40", features = ["log"] }
 tracing-test = "0.2.4"
+uint = "0.9.5"

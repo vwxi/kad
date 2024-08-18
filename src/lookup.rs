@@ -136,12 +136,12 @@ impl KadNode {
             if quorum < 2 {
                 debug!("quorum < 2, found value in local store, search is complete");
                 return FindValueResult::Value(val);
-            } else {
-                // otherwise, we count it as a found value
-                found_count.fetch_add(1, Ordering::Relaxed);
-                best = FindValueResult::Value(val);
-                debug!("found already in local store, counting as a valid result");
             }
+
+            // otherwise, we count it as a found value
+            found_count.fetch_add(1, Ordering::Relaxed);
+            best = FindValueResult::Value(val);
+            debug!("found already in local store, counting as a valid result");
         }
 
         // `pn` will have been seeded with `alpha` initial peers
@@ -153,14 +153,23 @@ impl KadNode {
             if found_count.load(Ordering::Relaxed) >= quorum
                 || (pending.load(Ordering::Relaxed) == 0 && pn.is_empty())
             {
-                debug!("quorum satisfied, updating outdated nodes");
+                debug!("quorum satisfied/no more new nodes, updating outdated nodes");
 
                 if let FindValueResult::Value(ref v) = best {
                     // don't forward entry, let's just store what was acquired
-                    tokio::task::block_in_place(|| {
-                        let _ = po.iter().map(|p| {
-                            debug!("storing best value at {:#x}", p.id);
-                            let _ = self.clone().store(p.peer(), key, v.clone());
+                    let kad = self.kad.upgrade().unwrap();
+                    let handle = kad.runtime.handle();
+
+                    let _ = po.iter().for_each(|p| {
+                        debug!("storing best value at {:#x}", p.id);
+
+                        tokio::task::block_in_place(|| {
+                            let _ = self.clone().store(
+                                handle
+                                    .block_on(RoutingTable::resolve(self.table.clone(), p.peer())),
+                                key,
+                                self.store.forward_entry(v.clone()),
+                            );
                         });
                     });
                 }
@@ -186,10 +195,10 @@ impl KadNode {
                                 debug!("disjoint: {:#x} already seen, excluding", peer.id);
                                 i = i.saturating_sub(1);
                                 continue;
-                            } else {
-                                // otherwise, add to `claimed` list
-                                lock.push(peer.id);
                             }
+
+                            // otherwise, add to `claimed` list
+                            lock.push(peer.id);
                         }
 
                         pending.fetch_add(1, Ordering::Relaxed);
@@ -256,7 +265,7 @@ impl KadNode {
                                 });
                             }
                             FindValueResult::Value(value) => {
-                                debug!("received value");
+                                debug!("received value from {:#x}", peer.id);
 
                                 match best {
                                     // if this is the first value seen,
@@ -394,17 +403,21 @@ impl KadNode {
     }
 }
 
+// these tests might take much longer because of key generation
 #[cfg(test)]
 mod tests {
     use crate::{
+        lookup::consts,
         node::Kad,
         routing::RoutingTable,
-        util::{FindValueResult, Hash},
+        store::Value,
+        util::{hash, FindValueResult, Hash},
     };
-    use futures::{executor::block_on, future::join_all};
+    use futures::executor::block_on;
     use std::sync::Arc;
-    use tracing_test::traced_test;
+    use tokio::task::JoinHandle;
     use tracing::debug;
+    use tracing_test::traced_test;
 
     fn setup(offset: u16) -> (Vec<Arc<Kad>>, Vec<tokio::task::JoinHandle<()>>) {
         let nodes: Vec<Arc<Kad>> = (0..5).map(|i| Kad::new(offset + i, false, true)).collect();
@@ -412,35 +425,35 @@ mod tests {
 
         // send find_nodes in this sequence:
         // A -> B
-        let _ = nodes[0]
-            .node
-            .clone()
-            .find_node(nodes[1].as_single_peer().peer(), Hash::from(1));
         debug!("A -> B");
-        // A -> C
         let _ = nodes[0]
             .node
             .clone()
-            .find_node(nodes[2].as_single_peer().peer(), Hash::from(1));
+            .find_node(nodes[1].as_peer(), Hash::from(1));
+        // A -> C
         debug!("A -> C");
-        // C -> A
-        let _ = nodes[2]
+        let _ = nodes[0]
             .node
             .clone()
-            .find_node(nodes[0].as_single_peer().peer(), Hash::from(1));
-        debug!("C -> A");
-        // B -> D
+            .find_node(nodes[2].as_peer(), Hash::from(1));
+        // A -> E
+        debug!("A -> E");
+        let _ = nodes[0]
+            .node
+            .clone()
+            .find_node(nodes[4].as_peer(), Hash::from(1));
+        // B -> E
+        debug!("B -> E");
         let _ = nodes[1]
             .node
             .clone()
-            .find_node(nodes[3].as_single_peer().peer(), Hash::from(1));
-        debug!("B -> D");
+            .find_node(nodes[4].as_peer(), Hash::from(1));
         // D -> A
+        debug!("D -> A");
         let _ = nodes[3]
             .node
             .clone()
-            .find_node(nodes[0].as_single_peer().peer(), Hash::from(1));
-        debug!("D -> A");
+            .find_node(nodes[0].as_peer(), Hash::from(1));
 
         (nodes, handles)
     }
@@ -453,46 +466,219 @@ mod tests {
         fn find_all_nodes() {
             let (nodes, handles) = setup(17000);
 
-            // call as C to get A, B and D
+            // call as C to get A, B, D, E
             let res = block_on(nodes[2].node.clone().iter_find_node(Hash::from(1)));
 
             assert!(!res.is_empty());
             assert!(res
                 .iter()
-                .all(|x| x.id == nodes[0].id() || x.id == nodes[1].id() || x.id == nodes[3].id()));
+                .all(|x| x.id == nodes[0].id() || x.id == nodes[1].id() || x.id == nodes[3].id() || x.id == nodes[4].id()));
 
-            block_on(join_all(handles));
+            let _ = handles.iter().for_each(JoinHandle::abort);
         }
     }
 
     mod lookup_value {
         use super::*;
 
+        // intersecting lookup with no/one valid value
         #[traced_test]
         #[test]
-        fn varying_values() {
+        fn ixn_single_valid() {
             let (nodes, handles) = setup(17010);
 
+            {
+                let shortlist = block_on(RoutingTable::find_alpha_peers(
+                    nodes[1].node.table.clone(),
+                    Hash::from(1),
+                ));
+
+                // no values
+                assert_eq!(
+                    block_on(nodes[1].node.clone().lookup_value(
+                        shortlist,
+                        None,
+                        Hash::from(1),
+                        consts::QUORUM
+                    )),
+                    FindValueResult::None,
+                    "checking when no values"
+                );
+            }
+
+            // one value
+            {
+                let first_entry = nodes[0]
+                    .node
+                    .store
+                    .create_new_entry(Value::Data(String::from("hello")));
+
+                let _ = nodes[0].node.clone().store(
+                    nodes[1].as_peer(),
+                    hash("good morning"),
+                    first_entry.clone(),
+                );
+
+                let shortlist = block_on(RoutingTable::find_alpha_peers(
+                    nodes[0].node.table.clone(),
+                    hash("good morning"),
+                ));
+
+                assert_eq!(
+                    block_on(nodes[3].node.clone().lookup_value(
+                        shortlist,
+                        None,
+                        hash("good morning"),
+                        consts::QUORUM
+                    )),
+                    FindValueResult::Value(first_entry),
+                    "checking when one value from node D"
+                );
+            }
+
+            let _ = handles.iter().for_each(JoinHandle::abort);
+        }
+
+        // intersecting lookup with two valid values
+        #[traced_test]
+        #[test]
+        fn ixn_two_valid() {
+            // two values, one newer than the other
+            // D should pick the newer value and A should be updated with the new value
+            let (nodes, handles) = setup(17020);
+
+            // A and B
+            let first_entry = nodes[0]
+                .node
+                .store
+                .create_new_entry(Value::Data(String::from("hello")));
+
+            // allow there to be a time difference
+            std::thread::sleep(tokio::time::Duration::from_secs(1));
+
+            let second_entry = nodes[1].node.store.republish_entry(first_entry.clone());
+
+            // A -> C
+            assert!(block_on(nodes[2].node.store.put(
+                nodes[0].as_single_peer(),
+                hash("good morning"),
+                first_entry.clone(),
+            )));
+            // B just has value
+            assert!(block_on(nodes[1].node.store.put(
+                nodes[1].as_single_peer(),
+                hash("good morning"),
+                second_entry.clone(),
+            )));
+
+            // let D search for the best value
             let shortlist = block_on(RoutingTable::find_alpha_peers(
-                nodes[1].node.table.clone(),
-                Hash::from(1),
+                nodes[3].node.table.clone(),
+                hash("good morning"),
             ));
 
-            // no values
+            // see if new value was obtained
             assert_eq!(
-                block_on(
-                    nodes[1]
-                        .node
-                        .clone()
-                        .lookup_value(shortlist, None, Hash::from(1), 2)
-                ),
-                FindValueResult::None,
-                "checking when no values"
+                block_on(nodes[3].node.clone().lookup_value(
+                    shortlist,
+                    None,
+                    hash("good morning"),
+                    consts::QUORUM
+                )),
+                FindValueResult::Value(second_entry.clone()),
+                "checking if the newer of the two values was chosen"
             );
 
-            // 
+            // see if new value was stored in previous holding nodes
+            assert_eq!(
+                block_on(nodes[2].node.store.get(&hash("good morning")))
+                    .expect("checking if old best peer received new node")
+                    .0
+                    .timestamp,
+                second_entry.0.timestamp,
+                "checking if new value was stored in previous node"
+            );
 
-            block_on(join_all(handles));
+            let _ = handles.iter().for_each(JoinHandle::abort);
+        }
+
+        #[traced_test]
+        #[test]
+        fn ixn_three_valid() {
+            // three values, two equal and one newer
+            // B and C have equal values, E has newer, search as D
+            // make sure B, C get new entry from C and that C's value is the returned
+            let (nodes, handles) = setup(17030);
+
+            // B and C
+            let first_entry = nodes[0]
+                .node
+                .store
+                .create_new_entry(Value::Data(String::from("hello")));
+            
+            assert!(block_on(nodes[1].node.store.put(
+                nodes[0].as_single_peer(),
+                hash("good morning"),
+                first_entry.clone(),
+            )));
+
+            assert!(block_on(nodes[2].node.store.put(
+                nodes[0].as_single_peer(),
+                hash("good morning"),
+                first_entry.clone(),
+            )));
+
+            // allow there to be a time difference
+            std::thread::sleep(tokio::time::Duration::from_secs(1));
+
+            // E
+            let second_entry = nodes[4].node.store.republish_entry(first_entry.clone());
+            block_on(nodes[4].node.store.put(
+                nodes[4].as_single_peer(),
+                hash("good morning"),
+                second_entry.clone(),
+            ));
+
+            // let D search for the best value
+            let shortlist = block_on(RoutingTable::find_alpha_peers(
+                nodes[3].node.table.clone(),
+                hash("good morning"),
+            ));
+
+            // see if new value was obtained
+            if let FindValueResult::Value(nv) = block_on(nodes[3].node.clone().lookup_value(
+                shortlist,
+                None,
+                hash("good morning"),
+                consts::QUORUM
+            )) {
+                assert_eq!(
+                    nv.0,
+                    second_entry.0,
+                    "checking if the newer of the three values was chosen"
+                );
+            } else {
+                panic!("new value was a nodes list");
+            }
+
+            // see if new value was stored in previous holding nodes
+            assert_eq!(
+                block_on(nodes[1].node.store.get(&hash("good morning")))
+                    .unwrap()
+                    .0,
+                second_entry.0,
+                "checking if B got new value"
+            );
+
+            assert_eq!(
+                block_on(nodes[2].node.store.get(&hash("good morning")))
+                    .unwrap()
+                    .0,
+                second_entry.0,
+                "checking if C got new value"
+            );
+
+            let _ = handles.iter().for_each(JoinHandle::abort);
         }
     }
 }

@@ -5,13 +5,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bigint::uint::U256;
 use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Addr(pub IpAddr, pub u16);
-pub type Hash = U256;
+pub type Hash = crate::U256;
 
 macro_rules! pred_block {
     ($( #[$meta:meta] {$($item:item)*} )*) => {

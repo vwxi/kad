@@ -11,32 +11,32 @@ pub(crate) const REPUBLISH_TIME: u64 = 86400;
 pub(crate) mod consts {
     crate::util::pred_block! {
         #[cfg(test)] {
-            pub(super) const REPUBLISH_INTERVAL: usize = 10;
+            pub(in super) const REPUBLISH_INTERVAL: usize = 10;
         }
 
         #[cfg(not(test))] {
-            pub(super) const REPUBLISH_INTERVAL: usize = 86400;
+            pub(in super) const REPUBLISH_INTERVAL: usize = 86400;
         }
     }
 }
 
 crate::util::pred_block! {
     #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)] {
-        pub(crate) struct ProviderRecord {
-            pub(crate) provider: Hash,
-            pub(crate) expiry: u64,
+        pub(in crate) struct ProviderRecord {
+            pub(in crate) provider: Hash,
+            pub(in crate) expiry: u64,
         }
 
-        pub(crate) enum Value {
+        pub(in crate) enum Value {
             Data(String),
             ProviderRecord(ProviderRecord),
         }
 
-        pub(crate) struct Entry {
-            pub(crate) value: Value,
-            pub(crate) signature: String,
-            pub(crate) origin: SinglePeer,
-            pub(crate) timestamp: u64,
+        pub(in crate) struct Entry {
+            pub(in crate) value: Value,
+            pub(in crate) signature: String,
+            pub(in crate) origin: SinglePeer,
+            pub(in crate) timestamp: u64,
         }
     }
 }
@@ -79,9 +79,19 @@ impl Store {
     }
 
     // update existing entry, sign it using own key. use when republishing entries
-    pub(crate) fn forward_entry(&self, mut entry: StoreEntry) -> StoreEntry {
+    pub(crate) fn republish_entry(&self, mut entry: StoreEntry) -> StoreEntry {
         entry.0.timestamp = timestamp();
 
+        let node = self.node.upgrade().unwrap();
+
+        let signature = node
+            .crypto
+            .sign(serde_json::to_string(&entry.0).unwrap().as_str());
+
+        (entry.0, signature)
+    }
+
+    pub(crate) fn forward_entry(&self, entry: StoreEntry) -> StoreEntry {
         let node = self.node.upgrade().unwrap();
 
         let signature = node
@@ -156,11 +166,7 @@ impl Store {
         }
 
         // if provider record, check if expiry has not passed
-        if let Value::ProviderRecord(ProviderRecord {
-            provider: _,
-            expiry: e,
-        }) = entry.0.value
-        {
+        if let Value::ProviderRecord(ProviderRecord { expiry: e, .. }) = entry.0.value {
             if ts > e {
                 return false;
             }
@@ -181,11 +187,11 @@ impl Store {
         true
     }
 
-    // get will re-sign the outer Entry object with its own key
+    // get does not re-sign entry, re-signing is for republishing only
     pub(crate) async fn get(&self, key: &Hash) -> Option<StoreEntry> {
         let lock = self.store.read().await;
 
-        lock.get(key).map(|entry| self.forward_entry(entry.clone()))
+        lock.get(key).cloned()
     }
 }
 
