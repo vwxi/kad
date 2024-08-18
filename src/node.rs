@@ -7,7 +7,7 @@ use crate::{
         hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
         SinglePeer,
     },
-    U256
+    U256,
 };
 use futures::executor::block_on;
 use std::sync::{Arc, Weak};

@@ -470,9 +470,10 @@ mod tests {
             let res = block_on(nodes[2].node.clone().iter_find_node(Hash::from(1)));
 
             assert!(!res.is_empty());
-            assert!(res
-                .iter()
-                .all(|x| x.id == nodes[0].id() || x.id == nodes[1].id() || x.id == nodes[3].id() || x.id == nodes[4].id()));
+            assert!(res.iter().all(|x| x.id == nodes[0].id()
+                || x.id == nodes[1].id()
+                || x.id == nodes[3].id()
+                || x.id == nodes[4].id()));
 
             let _ = handles.iter().for_each(JoinHandle::abort);
         }
@@ -615,7 +616,7 @@ mod tests {
                 .node
                 .store
                 .create_new_entry(Value::Data(String::from("hello")));
-            
+
             assert!(block_on(nodes[1].node.store.put(
                 nodes[0].as_single_peer(),
                 hash("good morning"),
@@ -650,11 +651,10 @@ mod tests {
                 shortlist,
                 None,
                 hash("good morning"),
-                consts::QUORUM
+                consts::QUORUM,
             )) {
                 assert_eq!(
-                    nv.0,
-                    second_entry.0,
+                    nv.0, second_entry.0,
                     "checking if the newer of the three values was chosen"
                 );
             } else {

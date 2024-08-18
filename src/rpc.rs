@@ -547,16 +547,15 @@ mod tests {
         );
 
         // request existing value from node
-        assert!(if let FindValueResult::Value(v) = first
-            .node
-            .clone()
-            .find_value(second_peer.clone(), hash("good morning"))
-            .unwrap()
-            .0 
+        assert!(
+            if let FindValueResult::Value(v) = first
+                .node
+                .clone()
+                .find_value(second_peer.clone(), hash("good morning"))
+                .unwrap()
+                .0
             {
-                block_on(
-                    first.node.store.validate(&first.as_single_peer(), &v)
-                )
+                block_on(first.node.store.validate(&first.as_single_peer(), &v))
             } else {
                 false
             },
@@ -579,7 +578,10 @@ mod tests {
 
             assert!(!reference.is_empty(), "check if local bucket is not empty");
             assert!(!n.is_empty(), "check if obtained bucket is not empty");
-            assert!(reference.iter().zip(n.iter()).all(|(x, y)| x.id == y.id), "check if obtained bucket matches local bucket");
+            assert!(
+                reference.iter().zip(n.iter()).all(|(x, y)| x.id == y.id),
+                "check if obtained bucket matches local bucket"
+            );
         } else {
             panic!("not a list of nodes");
         }
