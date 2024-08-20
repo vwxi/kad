@@ -4,7 +4,10 @@ use crate::{
 };
 use futures::future::{BoxFuture, FutureExt};
 use rand::Rng;
-use std::{future::Future, sync::{Arc, Weak}};
+use std::{
+    future::Future,
+    sync::{Arc, Weak},
+};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -180,7 +183,12 @@ impl RoutingTable {
         rt
     }
 
-    fn traverse(self: Arc<Self>, node: TrieRef, key: Hash, cutoff: usize) -> BoxFuture<'static, TrieRef> {
+    fn traverse(
+        self: Arc<Self>,
+        node: TrieRef,
+        key: Hash,
+        cutoff: usize,
+    ) -> BoxFuture<'static, TrieRef> {
         async move {
             let current = node.as_ref().unwrap().lock().await;
 
@@ -189,7 +197,8 @@ impl RoutingTable {
                 return node;
             }
 
-            let next = if key & (Hash::from(1) << (consts::HASH_SIZE - cutoff - 1)) == Hash::zero() {
+            let next = if key & (Hash::from(1) << (consts::HASH_SIZE - cutoff - 1)) == Hash::zero()
+            {
                 current.left.as_ref().unwrap().clone()
             } else {
                 current.right.as_ref().unwrap().clone()
@@ -204,7 +213,8 @@ impl RoutingTable {
     fn dfs<F, Fut>(self: Arc<Self>, node: TrieRef, f: F) -> BoxFuture<'static, ()>
     where
         Fut: Future<Output = ()> + Send,
-        F: Fn(Arc<Self>, InnerTrieRef) -> Fut + Send + Clone + 'static, {
+        F: Fn(Arc<Self>, InnerTrieRef) -> Fut + Send + Clone + 'static,
+    {
         async move {
             let inner = node.as_ref().unwrap();
             let current = inner.lock().await;
@@ -216,7 +226,7 @@ impl RoutingTable {
             }
 
             let (left, right) = (current.left.clone(), current.right.clone());
-            
+
             drop(current);
             self.clone().dfs(left, f.clone()).await;
             self.dfs(right, f).await;
@@ -286,7 +296,14 @@ impl RoutingTable {
     }
 
     pub(crate) async fn update<P: Pinger>(self: Arc<Self>, peer: SinglePeer) {
-        let n = self.clone().traverse(Some(self.clone().root.as_ref().unwrap().clone()), peer.id, 0).await;
+        let n = self
+            .clone()
+            .traverse(
+                Some(self.clone().root.as_ref().unwrap().clone()),
+                peer.id,
+                0,
+            )
+            .await;
 
         let mut trie = n.as_ref().unwrap().lock().await;
 
@@ -506,7 +523,7 @@ impl RoutingTable {
     async fn refresh<P: Pinger>(self: Arc<Self>, trie: &mut Trie) {
         let mut randomness: Hash = Hash::zero();
         rand::thread_rng().fill(&mut randomness.0[..]);
-        
+
         let mask: Hash = Hash::max_value() << (consts::HASH_SIZE - trie.cutoff);
         let random_id: Hash = trie.prefix | (randomness & !mask);
 
@@ -522,7 +539,12 @@ impl RoutingTable {
 
                 tokio::task::block_in_place(|| {
                     bkt.iter().for_each(|p| {
-                        p.addresses.iter().for_each(|a| handle.block_on(self.clone().update_trie::<P>(trie, SinglePeer::new(p.id, a.0))))
+                        p.addresses.iter().for_each(|a| {
+                            handle.block_on(
+                                self.clone()
+                                    .update_trie::<P>(trie, SinglePeer::new(p.id, a.0)),
+                            )
+                        })
                     });
                 });
             }
@@ -543,7 +565,8 @@ impl RoutingTable {
                     debug!("refreshed bucket {:#x}", lock.cutoff);
                 }
             }
-        }).await;
+        })
+        .await;
     }
 }
 
@@ -552,7 +575,10 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use crate::{
-        crypto::Crypto, node::{Kad, ResponsiveMockPinger, UnresponsiveMockPinger}, store::Store, util::{generate_peer, Addr}
+        crypto::Crypto,
+        node::{Kad, ResponsiveMockPinger, UnresponsiveMockPinger},
+        store::Store,
+        util::{generate_peer, Addr},
     };
 
     use super::*;
@@ -564,7 +590,7 @@ mod tests {
         Arc::new_cyclic(|outer| Kad {
             node: Arc::new_cyclic(|inner| {
                 let c = Crypto::new(inner.clone()).expect("could not initialize crypto");
-    
+
                 let kn = KadNode {
                     addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), 1000),
                     table: RoutingTable::new(id, inner.clone()),
@@ -572,7 +598,7 @@ mod tests {
                     crypto: c,
                     kad: outer.clone(),
                 };
-    
+
                 // add own key
                 block_on(
                     kn.crypto.entry(
@@ -583,7 +609,7 @@ mod tests {
                             .as_str(),
                     ),
                 );
-    
+
                 kn
             }),
             runtime: Runtime::new().expect("could not create runtime for Kad object"),
@@ -600,7 +626,11 @@ mod tests {
 
         let table = kad.node.table.clone();
 
-        block_on(table.clone().update::<ResponsiveMockPinger>(generate_peer(None)));
+        block_on(
+            table
+                .clone()
+                .update::<ResponsiveMockPinger>(generate_peer(None)),
+        );
 
         let root = table.root.as_ref().unwrap().blocking_lock();
         let bkt = root.bucket.as_ref().unwrap();
@@ -654,14 +684,20 @@ mod tests {
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
         }
 
-        block_on(table.clone().update::<ResponsiveMockPinger>(
-            generate_peer(Some(Hash::from(3) << (consts::HASH_SIZE - 2))),
-        ));
+        block_on(
+            table
+                .clone()
+                .update::<ResponsiveMockPinger>(generate_peer(Some(
+                    Hash::from(3) << (consts::HASH_SIZE - 2),
+                ))),
+        );
 
         {
             let root = table.root.as_ref().unwrap().blocking_lock();
@@ -685,9 +721,11 @@ mod tests {
         }
 
         for i in 0..consts::BUCKET_SIZE {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(table.id | Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(table.id | Hash::from(i)))),
+            );
         }
 
         {
@@ -722,22 +760,28 @@ mod tests {
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(table.id | Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(table.id | Hash::from(i)))),
+            );
         }
 
         // insert far nodes
         for i in 0..(consts::BUCKET_SIZE) {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
         }
 
         for i in 2..(consts::BUCKET_SIZE + 2) {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(Hash::from(70 | i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(Hash::from(70 | i)))),
+            );
         }
 
         {
@@ -758,42 +802,42 @@ mod tests {
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {
-            block_on(table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(table.id | Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(table.id | Hash::from(i)))),
+            );
         }
 
         let to_stale = generate_peer(Some(Hash::from(1)));
 
-        block_on(table.clone().update::<UnresponsiveMockPinger>(
-            to_stale,
-        ));
+        block_on(table.clone().update::<UnresponsiveMockPinger>(to_stale));
 
         // insert far nodes
         for i in 2..(consts::BUCKET_SIZE + 1) {
-            block_on(table.clone().update::<UnresponsiveMockPinger>(
-                generate_peer(Some(Hash::from(i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<UnresponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
         }
 
         // fill replacement cache
         for i in 0..(consts::CACHE_SIZE + 1) {
-            block_on(table.clone().update::<UnresponsiveMockPinger>(
-                generate_peer(Some(Hash::from(70 | i))),
-            ));
+            block_on(
+                table
+                    .clone()
+                    .update::<UnresponsiveMockPinger>(generate_peer(Some(Hash::from(70 | i)))),
+            );
         }
 
         // should become max staleness
         for _ in 0..=(consts::MISSED_PINGS_ALLOWED + 1) {
-            block_on(table.clone().update::<UnresponsiveMockPinger>(
-                to_stale,
-            ));
+            block_on(table.clone().update::<UnresponsiveMockPinger>(to_stale));
         }
 
         let stale = block_on(table.clone().find(to_stale.id));
-        let added = block_on(table.clone().find(
-            Hash::from(70 | consts::CACHE_SIZE),
-        ));
+        let added = block_on(table.clone().find(Hash::from(70 | consts::CACHE_SIZE)));
 
         assert!(stale.is_none());
         assert!(added.is_some());

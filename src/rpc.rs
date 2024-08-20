@@ -416,13 +416,16 @@ mod tests {
 
         // add addresses
         for _ in 0..=3 {
-            block_on(second.node.table.clone().update::<RealPinger>(
-                generate_peer(Some(Hash::from(1))),
-            ));
+            block_on(
+                second
+                    .node
+                    .table
+                    .clone()
+                    .update::<RealPinger>(generate_peer(Some(Hash::from(1)))),
+            );
         }
 
-        let reference =
-            block_on(second.node.table.clone().find(Hash::from(1))).unwrap();
+        let reference = block_on(second.node.table.clone().find(Hash::from(1))).unwrap();
 
         let res = first
             .node
@@ -483,14 +486,16 @@ mod tests {
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
         for i in 0..(BUCKET_SIZE - 1) {
-            block_on(second.node.table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(Hash::from(i))),
-            ));
+            block_on(
+                second
+                    .node
+                    .table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
         }
 
-        let reference = block_on(second.node.table.clone().find_bucket(
-            to_find,
-        ));
+        let reference = block_on(second.node.table.clone().find_bucket(to_find));
 
         assert!(!reference.is_empty());
 
@@ -522,9 +527,13 @@ mod tests {
 
         // fill second node with bullshit entries
         for i in 0..(BUCKET_SIZE - 1) {
-            block_on(second.node.table.clone().update::<ResponsiveMockPinger>(
-                generate_peer(Some(Hash::from(i))),
-            ));
+            block_on(
+                second
+                    .node
+                    .table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
         }
 
         // store a value in second node
@@ -568,9 +577,13 @@ mod tests {
             .0;
 
         if let FindValueResult::Nodes(n) = *res {
-            let reference = block_on(second.node.table.clone().find_bucket(
-                hash("good AFTERNOON"),
-            ));
+            let reference = block_on(
+                second
+                    .node
+                    .table
+                    .clone()
+                    .find_bucket(hash("good AFTERNOON")),
+            );
 
             assert!(!reference.is_empty(), "check if local bucket is not empty");
             assert!(!n.is_empty(), "check if obtained bucket is not empty");

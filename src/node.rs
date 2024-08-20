@@ -380,7 +380,5 @@ mod tests {
 
     #[traced_test]
     #[test]
-    fn refresh() {
-        
-    }
+    fn refresh() {}
 }

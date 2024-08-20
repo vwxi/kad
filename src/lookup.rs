@@ -168,8 +168,7 @@ impl KadNode {
 
                         tokio::task::block_in_place(|| {
                             let _ = self.clone().store(
-                                handle
-                                    .block_on(self.table.clone().resolve(p.as_peer())),
+                                handle.block_on(self.table.clone().resolve(p.as_peer())),
                                 key,
                                 self.store.forward_entry(*v.clone()),
                             );
@@ -259,9 +258,9 @@ impl KadNode {
                                             .iter()
                                             .filter(|x| !pq.contains(&x.id) && x.id != id)
                                             .map(|x| {
-                                                handle.block_on(self.table.clone().resolve(
-                                                    x.as_peer(),
-                                                ))
+                                                handle.block_on(
+                                                    self.table.clone().resolve(x.as_peer()),
+                                                )
                                             }),
                                     );
                                 });
@@ -491,9 +490,8 @@ mod tests {
             let (nodes, handles) = setup(17010);
 
             {
-                let shortlist = block_on(nodes[1].node.table.clone().find_alpha_peers(
-                    Hash::from(1),
-                ));
+                let shortlist =
+                    block_on(nodes[1].node.table.clone().find_alpha_peers(Hash::from(1)));
 
                 // no values
                 assert_eq!(
@@ -521,9 +519,13 @@ mod tests {
                     first_entry.clone(),
                 );
 
-                let shortlist = block_on(nodes[0].node.table.clone().find_alpha_peers(
-                    hash("good morning"),
-                ));
+                let shortlist = block_on(
+                    nodes[0]
+                        .node
+                        .table
+                        .clone()
+                        .find_alpha_peers(hash("good morning")),
+                );
 
                 assert_eq!(
                     block_on(nodes[3].node.clone().lookup_value(
@@ -573,9 +575,13 @@ mod tests {
             )));
 
             // let D search for the best value
-            let shortlist = block_on(nodes[3].node.table.clone().find_alpha_peers(
-                hash("good morning"),
-            ));
+            let shortlist = block_on(
+                nodes[3]
+                    .node
+                    .table
+                    .clone()
+                    .find_alpha_peers(hash("good morning")),
+            );
 
             // see if new value was obtained
             assert_eq!(
@@ -640,9 +646,13 @@ mod tests {
             ));
 
             // let D search for the best value
-            let shortlist = block_on(nodes[3].node.table.clone().find_alpha_peers(
-                hash("good morning"),
-            ));
+            let shortlist = block_on(
+                nodes[3]
+                    .node
+                    .table
+                    .clone()
+                    .find_alpha_peers(hash("good morning")),
+            );
 
             // see if new value was obtained
             if let FindValueResult::Value(nv) = block_on(nodes[3].node.clone().lookup_value(
