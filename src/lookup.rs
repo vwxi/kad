@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::{
     node::KadNode,
-    routing::{consts::ALPHA, RoutingTable},
+    routing::{self, consts::ALPHA, RoutingTable},
     util::{FindValueResult, Hash, Peer, SinglePeer},
 };
 
@@ -29,7 +29,7 @@ impl KadNode {
         key: Hash,
     ) -> Vec<Peer> {
         // own id
-        let id = self.table.lock().await.id;
+        let id = self.table.id;
         // all valid contacted peers
         let mut res: Vec<Peer> = vec![];
         // all peers contacted regardless of response
@@ -73,7 +73,7 @@ impl KadNode {
                                         continue;
                                     }
 
-                                    shortlist.push_back(peer.peer());
+                                    shortlist.push_back(peer.as_peer());
                                 }
                             }
                         });
@@ -102,6 +102,9 @@ impl KadNode {
             }
         }
 
+        // truncate results
+        res.truncate(routing::consts::BUCKET_SIZE);
+
         res
     }
 
@@ -114,7 +117,7 @@ impl KadNode {
         quorum: usize,
     ) -> FindValueResult {
         // own id
-        let id = self.table.lock().await.id;
+        let id = self.table.id;
         // number of valid values found
         let found_count = AtomicUsize::new(0);
         // pending requests count
@@ -166,7 +169,7 @@ impl KadNode {
                         tokio::task::block_in_place(|| {
                             let _ = self.clone().store(
                                 handle
-                                    .block_on(RoutingTable::resolve(self.table.clone(), p.peer())),
+                                    .block_on(self.table.clone().resolve(p.as_peer())),
                                 key,
                                 self.store.forward_entry(*v.clone()),
                             );
@@ -203,7 +206,7 @@ impl KadNode {
 
                         pending.fetch_add(1, Ordering::Relaxed);
 
-                        peer = RoutingTable::resolve(self.table.clone(), peer).await;
+                        peer = self.table.clone().resolve(peer).await;
 
                         // spawn new task
                         debug!("querying peer {:#x}", peer.id);
@@ -256,9 +259,8 @@ impl KadNode {
                                             .iter()
                                             .filter(|x| !pq.contains(&x.id) && x.id != id)
                                             .map(|x| {
-                                                handle.block_on(RoutingTable::resolve(
-                                                    self.table.clone(),
-                                                    x.peer(),
+                                                handle.block_on(self.table.clone().resolve(
+                                                    x.as_peer(),
                                                 ))
                                             }),
                                     );
@@ -359,13 +361,13 @@ impl KadNode {
             .await
     }
 
-    async fn disjoint_lookup_value(
+    pub(crate) async fn disjoint_lookup_value(
         self: Arc<Self>,
         key: Hash,
         disjoint_paths: usize,
         quorum: usize,
     ) -> Vec<FindValueResult> {
-        let mut initial: Vec<Peer> = RoutingTable::find_alpha_peers(self.table.clone(), key).await;
+        let mut initial: Vec<Peer> = self.table.clone().find_alpha_peers(key).await;
         let claimed: Arc<Mutex<Vec<Hash>>> = Arc::new(Mutex::new(vec![]));
         let mut tasks = FuturesUnordered::new();
 
@@ -397,7 +399,7 @@ impl KadNode {
 
     pub(crate) async fn iter_find_node(self: Arc<Self>, key: Hash) -> Vec<Peer> {
         let shortlist: VecDeque<Peer> =
-            VecDeque::from(RoutingTable::find_alpha_peers(self.table.clone(), key).await);
+            VecDeque::from(self.table.clone().find_alpha_peers(key).await);
 
         self.lookup_nodes(shortlist, key).await
     }
@@ -489,8 +491,7 @@ mod tests {
             let (nodes, handles) = setup(17010);
 
             {
-                let shortlist = block_on(RoutingTable::find_alpha_peers(
-                    nodes[1].node.table.clone(),
+                let shortlist = block_on(nodes[1].node.table.clone().find_alpha_peers(
                     Hash::from(1),
                 ));
 
@@ -520,8 +521,7 @@ mod tests {
                     first_entry.clone(),
                 );
 
-                let shortlist = block_on(RoutingTable::find_alpha_peers(
-                    nodes[0].node.table.clone(),
+                let shortlist = block_on(nodes[0].node.table.clone().find_alpha_peers(
                     hash("good morning"),
                 ));
 
@@ -573,8 +573,7 @@ mod tests {
             )));
 
             // let D search for the best value
-            let shortlist = block_on(RoutingTable::find_alpha_peers(
-                nodes[3].node.table.clone(),
+            let shortlist = block_on(nodes[3].node.table.clone().find_alpha_peers(
                 hash("good morning"),
             ));
 
@@ -641,8 +640,7 @@ mod tests {
             ));
 
             // let D search for the best value
-            let shortlist = block_on(RoutingTable::find_alpha_peers(
-                nodes[3].node.table.clone(),
+            let shortlist = block_on(nodes[3].node.table.clone().find_alpha_peers(
                 hash("good morning"),
             ));
 

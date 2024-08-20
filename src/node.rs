@@ -51,9 +51,7 @@ impl Kad {
     }
 
     pub fn id(self: &Arc<Self>) -> Hash {
-        let table = self.node.table.blocking_lock();
-
-        table.id
+        self.node.table.id
     }
 
     pub(crate) fn as_single_peer(self: &Arc<Self>) -> SinglePeer {
@@ -64,7 +62,7 @@ impl Kad {
     }
 
     pub(crate) fn as_peer(self: &Arc<Self>) -> Peer {
-        self.as_single_peer().peer()
+        self.as_single_peer().as_peer()
     }
 }
 
@@ -124,11 +122,7 @@ macro_rules! kad_fn {
                 return Err(Box::new(nothing));
             }
 
-            let args;
-            {
-                let table = self.table.blocking_lock();
-                args = self.crypto.args(table.id, $op($( $arg ),*), self.addr, timestamp());
-            }
+            let args = self.crypto.args(self.table.id, $op($( $arg ),*), self.addr, timestamp());
 
             let handle = kad.runtime.handle();
 
@@ -171,10 +165,8 @@ macro_rules! kad_fn {
 }
 
 // TODO: join mechanism
-// TODO: lookup_nodes mechanism
-// TODO: lookup_value mechanism
-// TODO: peer resolution mechanism
 // TODO: republish mechanism
+// TODO: refresh mechanism
 // TODO: iterative store mechanism
 impl KadNode {
     // TODO: implement non-local forwarding of some sort
@@ -291,7 +283,7 @@ impl KadNode {
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Store = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
-                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+                    node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((true, resp))
                 } else {
@@ -311,7 +303,7 @@ impl KadNode {
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::FindNode(peers) = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
-                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+                    node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((peers, resp))
                 } else {
@@ -331,7 +323,7 @@ impl KadNode {
         |node: Arc<KadNode>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::FindValue(result) = res.0.clone() {
                 if node.crypto.verify_results(&resp.id, &res).await {
-                    RoutingTable::update::<RealPinger>(node.table.clone(), resp).await;
+                    node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((result, resp))
                 } else {
@@ -375,5 +367,20 @@ impl Pinger for UnresponsiveMockPinger {
             id: p.id,
             addr: p.addresses.first().unwrap().0,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+
+    use crate::{routing::consts, util::generate_peer};
+
+    use super::*;
+
+    #[traced_test]
+    #[test]
+    fn refresh() {
+        
     }
 }

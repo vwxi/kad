@@ -1,6 +1,5 @@
 use crate::{
     node::{Kad, KadNode, RealPinger},
-    routing::RoutingTable,
     util::{Addr, FindValueResult, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
@@ -117,7 +116,7 @@ impl RpcService for Service {
         (
             if let RpcOp::GetAddresses(id) = args.0.op {
                 RpcResult::GetAddresses(
-                    if let Some(peer) = RoutingTable::find(self.node.table.clone(), id).await {
+                    if let Some(peer) = self.node.table.clone().find(id).await {
                         Some(peer.addresses.iter().map(|a| a.0).collect())
                     } else {
                         None
@@ -138,7 +137,7 @@ impl RpcService for Service {
         let sender = SinglePeer::new(args.0.id, args.0.addr);
 
         if let RpcOp::Store(k, v) = args.0.op {
-            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+            self.node.table.clone().update::<RealPinger>(sender).await;
 
             self.node
                 .crypto
@@ -160,9 +159,9 @@ impl RpcService for Service {
         let sender = SinglePeer::new(args.0.id, args.0.addr);
 
         if let RpcOp::FindNode(id) = args.0.op {
-            let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
+            let bkt = self.node.table.clone().find_bucket(id).await;
 
-            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+            self.node.table.clone().update::<RealPinger>(sender).await;
 
             self.node.crypto.results(RpcResult::FindNode(bkt))
         } else {
@@ -178,7 +177,7 @@ impl RpcService for Service {
         let sender = SinglePeer::new(args.0.id, args.0.addr);
 
         if let RpcOp::FindValue(id) = args.0.op {
-            RoutingTable::update::<RealPinger>(self.node.table.clone(), sender).await;
+            self.node.table.clone().update::<RealPinger>(sender).await;
 
             if let Some(e) = self.node.store.get(&id).await {
                 self.node
@@ -187,7 +186,7 @@ impl RpcService for Service {
                         Box::new(e),
                     ))))
             } else {
-                let bkt = RoutingTable::find_bucket(self.node.table.clone(), id).await;
+                let bkt = self.node.table.clone().find_bucket(id).await;
                 self.node
                     .crypto
                     .results(RpcResult::FindValue(Box::new(FindValueResult::Nodes(bkt))))
@@ -366,7 +365,7 @@ impl Network for KadNetwork {}
 mod tests {
     use crate::{
         node::{Kad, KadNode, RealPinger, ResponsiveMockPinger},
-        routing::{consts::BUCKET_SIZE, RoutingTable},
+        routing::consts::BUCKET_SIZE,
         store::Value,
         util::{generate_peer, hash, FindValueResult, Hash, Peer},
     };
@@ -417,14 +416,13 @@ mod tests {
 
         // add addresses
         for _ in 0..=3 {
-            block_on(RoutingTable::update::<RealPinger>(
-                second.node.table.clone(),
+            block_on(second.node.table.clone().update::<RealPinger>(
                 generate_peer(Some(Hash::from(1))),
             ));
         }
 
         let reference =
-            block_on(RoutingTable::find(second.node.table.clone(), Hash::from(1))).unwrap();
+            block_on(second.node.table.clone().find(Hash::from(1))).unwrap();
 
         let res = first
             .node
@@ -485,14 +483,12 @@ mod tests {
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
         for i in 0..(BUCKET_SIZE - 1) {
-            block_on(RoutingTable::update::<ResponsiveMockPinger>(
-                second.node.table.clone(),
+            block_on(second.node.table.clone().update::<ResponsiveMockPinger>(
                 generate_peer(Some(Hash::from(i))),
             ));
         }
 
-        let reference = block_on(RoutingTable::find_bucket(
-            second.node.table.clone(),
+        let reference = block_on(second.node.table.clone().find_bucket(
             to_find,
         ));
 
@@ -526,8 +522,7 @@ mod tests {
 
         // fill second node with bullshit entries
         for i in 0..(BUCKET_SIZE - 1) {
-            block_on(RoutingTable::update::<ResponsiveMockPinger>(
-                second.node.table.clone(),
+            block_on(second.node.table.clone().update::<ResponsiveMockPinger>(
                 generate_peer(Some(Hash::from(i))),
             ));
         }
@@ -573,8 +568,7 @@ mod tests {
             .0;
 
         if let FindValueResult::Nodes(n) = *res {
-            let reference = block_on(RoutingTable::find_bucket(
-                second.node.table.clone(),
+            let reference = block_on(second.node.table.clone().find_bucket(
                 hash("good AFTERNOON"),
             ));
 

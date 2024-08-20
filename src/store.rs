@@ -109,7 +109,7 @@ impl Store {
             .crypto
             .if_unknown(
                 &entry.0.origin.id,
-                || async { KadNode::key(node.clone(), entry.0.origin.peer()).is_ok() },
+                || async { KadNode::key(node.clone(), entry.0.origin.as_peer()).is_ok() },
                 || false,
             )
             .await
@@ -123,7 +123,7 @@ impl Store {
             .crypto
             .if_unknown(
                 &sender.id,
-                || async { KadNode::key(node.clone(), sender.peer()).is_ok() },
+                || async { KadNode::key(node.clone(), sender.as_peer()).is_ok() },
                 || false,
             )
             .await

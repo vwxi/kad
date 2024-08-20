@@ -104,7 +104,7 @@ impl SinglePeer {
     }
 
     #[must_use]
-    pub fn peer(&self) -> Peer {
+    pub fn as_peer(&self) -> Peer {
         Peer {
             id: self.id,
             addresses: vec![(self.addr, 0)],
