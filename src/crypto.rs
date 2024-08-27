@@ -1,4 +1,4 @@
-use crate::node::KadNode;
+use crate::node::InnerKad;
 use crate::util::{
     decode_hex, timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp, RpcResult, RpcResults,
 };
@@ -22,11 +22,12 @@ pub(crate) mod consts {
     pub(crate) const MAX_KEYS: usize = 64;
 }
 
+#[derive(Debug)]
 pub(crate) struct Crypto {
     pub(crate) private: RsaPrivateKey,
     pub(crate) public: RsaPublicKey,
     pub(crate) signing: SigningKey<Sha256>,
-    pub(crate) node: Weak<KadNode>,
+    pub(crate) node: Weak<InnerKad>,
 
     // hash -> (key, last contacted (for pruning))
     pub(crate) keyring: RwLock<BTreeMap<Hash, (RsaPublicKey, u64)>>,
@@ -34,7 +35,7 @@ pub(crate) struct Crypto {
 
 impl Crypto {
     // randomly generate key
-    pub(crate) fn new(node_: Weak<KadNode>) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(node_: Weak<InnerKad>) -> Result<Self, Box<dyn Error>> {
         let mut rng = rand::thread_rng();
         let private_key = RsaPrivateKey::new(&mut rng, consts::KEY_BITS)?;
         let public_key = RsaPublicKey::from(private_key.clone());
@@ -49,7 +50,7 @@ impl Crypto {
     }
 
     pub(crate) fn from_file(
-        node_: Weak<KadNode>,
+        node_: Weak<InnerKad>,
         priv_file: &str,
         pub_file: &str,
     ) -> Result<Self, Box<dyn Error>> {
@@ -141,7 +142,7 @@ impl Crypto {
                 let own_id;
                 {
                     let n = self.node.upgrade().unwrap();
-                    let k = n.kad.upgrade().unwrap();
+                    let k = n.parent.upgrade().unwrap();
                     own_id = k.id();
                 }
 

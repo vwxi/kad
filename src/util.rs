@@ -5,6 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use rand::{distributions::Standard, prelude::Distribution, Rng};
 use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +73,6 @@ impl Peer {
         }
     }
 
-    #[must_use]
     pub fn single_peer(&self) -> SinglePeer {
         let nothing: Addr = Addr(IpAddr::from(Ipv4Addr::UNSPECIFIED), 0);
 
@@ -81,7 +81,10 @@ impl Peer {
             addr: if self.addresses.is_empty() {
                 nothing
             } else {
-                self.addresses.first().unwrap().0
+                self.addresses
+                    .first()
+                    .expect("could not find any addresses to use in SinglePeer")
+                    .0
             },
         }
     }
@@ -109,6 +112,13 @@ impl SinglePeer {
             id: self.id,
             addresses: vec![(self.addr, 0)],
         }
+    }
+}
+
+impl Distribution<Hash> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, _: &mut R) -> Hash {
+        let i = (0..32u8).map(|_| rand::random::<u8>()).collect::<Vec<_>>();
+        Hash::from(&i[..])
     }
 }
 
@@ -141,8 +151,7 @@ pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
         id: if let Some(pid_) = pid {
             pid_
         } else {
-            let i = (0..32u8).map(|_| rand::random::<u8>()).collect::<Vec<_>>();
-            Hash::from(&i[..])
+            rand::random()
         },
         addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), rand::random()),
     }

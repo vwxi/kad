@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -11,8 +12,9 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::{
-    node::KadNode,
-    routing::{self, consts::ALPHA, RoutingTable},
+    node::InnerKad,
+    routing::{self, consts::ALPHA},
+    store::StoreEntry,
     util::{FindValueResult, Hash, Peer, SinglePeer},
 };
 
@@ -21,9 +23,9 @@ pub(crate) mod consts {
     pub(crate) const QUORUM: usize = 3;
 }
 
-impl KadNode {
+impl InnerKad {
     // xlattice-style lookup
-    pub(crate) async fn lookup_nodes(
+    pub(crate) fn lookup_nodes(
         self: Arc<Self>,
         mut shortlist: VecDeque<Peer>,
         key: Hash,
@@ -108,6 +110,155 @@ impl KadNode {
         res
     }
 
+    async fn send_alpha_calls(
+        self: Arc<Self>,
+        pn: &mut Vec<Peer>,
+        pq: &mut Vec<Hash>,
+        claimed: Option<Arc<Mutex<Vec<Hash>>>>,
+        pending_count: Arc<AtomicUsize>,
+        key: Hash,
+    ) -> FuturesUnordered<impl Future<Output = (Option<Box<FindValueResult>>, SinglePeer)>> {
+        let tasks = FuturesUnordered::new();
+        {
+            let mut pn_it = pn.drain(..);
+
+            // be quiet...
+            #[allow(unused_assignments)]
+            for mut i in 0..ALPHA {
+                if let Some(mut peer) = pn_it.next() {
+                    // FOR DISJOINT PATH LOOKUPS, check if peer exists in any other search
+                    if let Some(ref claimed_list) = claimed {
+                        let mut lock = claimed_list.lock().await;
+
+                        // if seen already, we exclude this "claimed" peer
+                        if lock.iter().any(|&x| x == peer.id) {
+                            debug!("disjoint: {:#x} already seen, excluding", peer.id);
+                            i = i.saturating_sub(1);
+                            continue;
+                        }
+
+                        // otherwise, add to `claimed` list
+                        lock.push(peer.id);
+                    }
+
+                    pending_count.fetch_add(1, Ordering::Relaxed);
+
+                    peer = self.table.clone().resolve(peer).await;
+
+                    // spawn new task
+                    debug!("querying peer {:#x}", peer.id);
+
+                    let (new_self, new_peer) = (self.clone(), peer.clone());
+                    tasks.push(async move {
+                        tokio::task::block_in_place(|| match new_self.find_value(new_peer, key) {
+                            Ok((result, responding_peer)) => (Some(result), responding_peer),
+                            Err(p) => (None, *p),
+                        })
+                    });
+
+                    // mark as queried in `pq`
+                    pq.push(peer.id);
+                }
+            }
+        }
+
+        tasks
+    }
+
+    // if without value, add unqueried closest nodes to `pn`
+    // ensure node isn't an element of `pq`, `pn` or is self
+    fn handle_node_list(
+        self: Arc<Self>,
+        nodes: &[SinglePeer],
+        pn: &mut Vec<Peer>,
+        pq: &mut [Hash],
+    ) {
+        debug!("received bucket, adding unvisited peers...");
+
+        let kad = self.parent.upgrade().unwrap();
+        let handle = kad.runtime.handle();
+
+        pn.extend(
+            nodes
+                .iter()
+                .filter(|x| !pq.contains(&x.id) && x.id != self.table.id)
+                .map(|x| handle.block_on(self.table.clone().resolve(x.as_peer()))),
+        );
+    }
+
+    async fn handle_value(
+        self: Arc<Self>,
+        peer: SinglePeer,
+        value: Box<StoreEntry>,
+        best: &mut FindValueResult,
+        found_count: Arc<AtomicUsize>,
+        pb: &mut Vec<SinglePeer>,
+        po: &mut Vec<SinglePeer>,
+    ) {
+        debug!("received value from {:#x}", peer.id);
+
+        match best {
+            // if this is the first value seen,
+            // store it in `best` and store peer in `pb`
+            FindValueResult::None => {
+                debug!("first value, storing in best and pb");
+                *best = FindValueResult::Value(value);
+                pb.push(peer);
+            }
+            // resolve value conflict with validation
+            FindValueResult::Value(ref best_value) => {
+                debug!("resolving value conflict with validator");
+
+                // select newest and valid between `best_value` and `value`
+                // if equal just add peer to `pb`
+                match value.0.timestamp.cmp(&best_value.0.timestamp) {
+                    // if new value wins, move all `pb` nodes to `po` to mark
+                    // as outdated, set new peer as `best` and add peer to `pb`
+                    std::cmp::Ordering::Greater => {
+                        // now check if valid.
+                        if self.store.validate(&peer, &value).await {
+                            debug!("new value wins, marking peers as outdated");
+                            po.append(pb);
+
+                            debug!("clearing pb and inserting new winner");
+                            pb.clear();
+                            *best = FindValueResult::Value(value);
+                            pb.push(peer);
+
+                            found_count.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            // value loses, add current peer to `po`
+                            debug!("new value lost, adding peer to po");
+                            po.push(peer);
+                        }
+                    }
+                    // if new value is equal, add to `pb`
+                    std::cmp::Ordering::Equal => {
+                        if self.store.validate(&peer, &value).await {
+                            debug!("new value is equal to best value, adding to pb");
+                            pb.push(peer);
+
+                            found_count.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            debug!("new value is equal and has lost, adding peer to po");
+                            po.push(peer);
+                        }
+                    }
+                    // if new value is less, it has lost and add to po
+                    std::cmp::Ordering::Less => {
+                        debug!("new value is less and has lost, adding peer to po");
+                        po.push(peer);
+                    }
+                }
+            }
+
+            // this should never reach
+            FindValueResult::Nodes(_) => {
+                panic!("best value should not be a node list");
+            }
+        }
+    }
+
     // libp2p-style value retrieval
     pub(crate) async fn lookup_value(
         self: Arc<Self>,
@@ -116,12 +267,10 @@ impl KadNode {
         key: Hash,
         quorum: usize,
     ) -> FindValueResult {
-        // own id
-        let id = self.table.id;
         // number of valid values found
-        let found_count = AtomicUsize::new(0);
+        let found_count = Arc::new(AtomicUsize::new(0));
         // pending requests count
-        let pending = AtomicUsize::new(0);
+        let pending = Arc::new(AtomicUsize::new(0));
         // best value and collision bool
         let mut best: FindValueResult = FindValueResult::None;
 
@@ -148,7 +297,6 @@ impl KadNode {
         }
 
         // `pn` will have been seeded with `alpha` initial peers
-
         loop {
             // if we've collected `quorum` or more answers, return `best`
             // if there are no requests pending and `pn` is empty, return `best`
@@ -160,7 +308,7 @@ impl KadNode {
 
                 if let FindValueResult::Value(ref v) = best {
                     // don't forward entry, let's just store what was acquired
-                    let kad = self.kad.upgrade().unwrap();
+                    let kad = self.parent.upgrade().unwrap();
                     let handle = kad.runtime.handle();
 
                     for p in &po {
@@ -180,53 +328,10 @@ impl KadNode {
             }
 
             // otherwise, send `alpha` `pn` peers a find_value call
-            let mut tasks = FuturesUnordered::new();
-            {
-                let mut pn_it = pn.drain(..);
-
-                // be quiet...
-                #[allow(unused_assignments)]
-                for mut i in 0..ALPHA {
-                    if let Some(mut peer) = pn_it.next() {
-                        // FOR DISJOINT PATH LOOKUPS, check if peer exists in any other search
-                        if let Some(ref claimed_list) = claimed {
-                            let mut lock = claimed_list.lock().await;
-
-                            // if seen already, we exclude this "claimed" peer
-                            if lock.iter().any(|&x| x == peer.id) {
-                                debug!("disjoint: {:#x} already seen, excluding", peer.id);
-                                i = i.saturating_sub(1);
-                                continue;
-                            }
-
-                            // otherwise, add to `claimed` list
-                            lock.push(peer.id);
-                        }
-
-                        pending.fetch_add(1, Ordering::Relaxed);
-
-                        peer = self.table.clone().resolve(peer).await;
-
-                        // spawn new task
-                        debug!("querying peer {:#x}", peer.id);
-
-                        let (new_self, new_peer) = (self.clone(), peer.clone());
-                        tasks.push(async move {
-                            tokio::task::block_in_place(|| {
-                                match new_self.find_value(new_peer, key) {
-                                    Ok((result, responding_peer)) => {
-                                        (Some(result), responding_peer)
-                                    }
-                                    Err(p) => (None, *p),
-                                }
-                            })
-                        });
-
-                        // mark as queried in `pq`
-                        pq.push(peer.id);
-                    }
-                }
-            }
+            let mut tasks = self
+                .clone()
+                .send_alpha_calls(&mut pn, &mut pq, claimed.clone(), pending.clone(), key)
+                .await;
 
             // just stop if things aren't sending
             if tasks.is_empty() {
@@ -245,91 +350,21 @@ impl KadNode {
                     (Some(result), peer) => {
                         match *result {
                             FindValueResult::Nodes(nodes) => {
-                                // if without value, add unqueried closest nodes to `pn`
-                                // ensure node isn't an element of `pq`, `pn` or is self
-                                debug!("received bucket, adding unvisited peers...");
-
-                                let kad = self.kad.upgrade().unwrap();
-                                let handle = kad.runtime.handle();
-
                                 tokio::task::block_in_place(|| {
-                                    pn.extend(
-                                        nodes
-                                            .iter()
-                                            .filter(|x| !pq.contains(&x.id) && x.id != id)
-                                            .map(|x| {
-                                                handle.block_on(
-                                                    self.table.clone().resolve(x.as_peer()),
-                                                )
-                                            }),
-                                    );
+                                    self.clone().handle_node_list(&nodes, &mut pn, &mut pq);
                                 });
                             }
                             FindValueResult::Value(value) => {
-                                debug!("received value from {:#x}", peer.id);
-
-                                match best {
-                                    // if this is the first value seen,
-                                    // store it in `best` and store peer in `pb`
-                                    FindValueResult::None => {
-                                        debug!("first value, storing in best and pb");
-                                        best = FindValueResult::Value(value);
-                                        pb.push(peer);
-                                    }
-                                    // resolve value conflict with validation
-                                    FindValueResult::Value(ref best_value) => {
-                                        debug!("resolving value conflict with validator");
-
-                                        // select newest and valid between `best_value` and `value`
-                                        // if equal just add peer to `pb`
-                                        match value.0.timestamp.cmp(&best_value.0.timestamp) {
-                                            // if new value wins, move all `pb` nodes to `po` to mark
-                                            // as outdated, set new peer as `best` and add peer to `pb`
-                                            std::cmp::Ordering::Greater => {
-                                                // now check if valid.
-                                                if self.store.validate(&peer, &value).await {
-                                                    debug!(
-                                                        "new value wins, marking peers as outdated"
-                                                    );
-                                                    po.append(&mut pb);
-
-                                                    debug!("clearing pb and inserting new winner");
-                                                    pb.clear();
-                                                    best = FindValueResult::Value(value);
-                                                    pb.push(peer);
-
-                                                    found_count.fetch_add(1, Ordering::Relaxed);
-                                                } else {
-                                                    // value loses, add current peer to `po`
-                                                    debug!("new value lost, adding peer to po");
-                                                    po.push(peer);
-                                                }
-                                            }
-                                            // if new value is equal, add to `pb`
-                                            std::cmp::Ordering::Equal => {
-                                                if self.store.validate(&peer, &value).await {
-                                                    debug!("new value is equal to best value, adding to pb");
-                                                    pb.push(peer);
-
-                                                    found_count.fetch_add(1, Ordering::Relaxed);
-                                                } else {
-                                                    debug!("new value is equal and has lost, adding peer to po");
-                                                    po.push(peer);
-                                                }
-                                            }
-                                            // if new value is less, it has lost and add to po
-                                            std::cmp::Ordering::Less => {
-                                                debug!("new value is less and has lost, adding peer to po");
-                                                po.push(peer);
-                                            }
-                                        }
-                                    }
-
-                                    // this should never reach
-                                    FindValueResult::Nodes(_) => {
-                                        panic!("best value should not be a node list");
-                                    }
-                                }
+                                self.clone()
+                                    .handle_value(
+                                        peer,
+                                        value,
+                                        &mut best,
+                                        found_count.clone(),
+                                        &mut pb,
+                                        &mut po,
+                                    )
+                                    .await;
                             }
                             // timeout/error
                             FindValueResult::None => {
@@ -400,7 +435,7 @@ impl KadNode {
         let shortlist: VecDeque<Peer> =
             VecDeque::from(self.table.clone().find_alpha_peers(key).await);
 
-        self.lookup_nodes(shortlist, key).await
+        self.lookup_nodes(shortlist, key)
     }
 }
 
@@ -410,19 +445,17 @@ mod tests {
     use crate::{
         lookup::consts,
         node::Kad,
-        routing::RoutingTable,
         store::Value,
         util::{hash, FindValueResult, Hash},
     };
     use futures::executor::block_on;
     use std::sync::Arc;
-    use tokio::task::JoinHandle;
     use tracing::debug;
     use tracing_test::traced_test;
 
-    fn setup(offset: u16) -> (Vec<Arc<Kad>>, Vec<tokio::task::JoinHandle<()>>) {
+    fn setup(offset: u16) -> Vec<Arc<Kad>> {
         let nodes: Vec<Arc<Kad>> = (0..5).map(|i| Kad::new(offset + i, false, true)).collect();
-        let handles: Vec<_> = nodes.iter().map(|x| x.clone().serve().unwrap()).collect();
+        nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
         // send find_nodes in this sequence:
         // A -> B
@@ -456,7 +489,7 @@ mod tests {
             .clone()
             .find_node(nodes[0].as_peer(), Hash::from(1));
 
-        (nodes, handles)
+        nodes
     }
 
     mod lookup_nodes {
@@ -465,7 +498,7 @@ mod tests {
         #[traced_test]
         #[test]
         fn find_all_nodes() {
-            let (nodes, handles) = setup(17000);
+            let nodes = setup(17000);
 
             // call as C to get A, B, D, E
             let res = block_on(nodes[2].node.clone().iter_find_node(Hash::from(1)));
@@ -475,8 +508,6 @@ mod tests {
                 || x.id == nodes[1].id()
                 || x.id == nodes[3].id()
                 || x.id == nodes[4].id()));
-
-            handles.iter().for_each(JoinHandle::abort);
         }
     }
 
@@ -487,7 +518,7 @@ mod tests {
         #[traced_test]
         #[test]
         fn ixn_single_valid() {
-            let (nodes, handles) = setup(17010);
+            let nodes = setup(17010);
 
             {
                 let shortlist =
@@ -538,8 +569,6 @@ mod tests {
                     "checking when one value from node D"
                 );
             }
-
-            handles.iter().for_each(JoinHandle::abort);
         }
 
         // intersecting lookup with two valid values
@@ -548,7 +577,7 @@ mod tests {
         fn ixn_two_valid() {
             // two values, one newer than the other
             // D should pick the newer value and A should be updated with the new value
-            let (nodes, handles) = setup(17020);
+            let nodes = setup(17020);
 
             // A and B
             let first_entry = nodes[0]
@@ -604,8 +633,6 @@ mod tests {
                 second_entry.0.timestamp,
                 "checking if new value was stored in previous node"
             );
-
-            handles.iter().for_each(JoinHandle::abort);
         }
 
         #[traced_test]
@@ -614,7 +641,7 @@ mod tests {
             // three values, two equal and one newer
             // B and C have equal values, E has newer, search as D
             // make sure B, C get new entry from C and that C's value is the returned
-            let (nodes, handles) = setup(17030);
+            let nodes = setup(17030);
 
             // B and C
             let first_entry = nodes[0]
@@ -685,8 +712,6 @@ mod tests {
                 second_entry.0,
                 "checking if C got new value"
             );
-
-            handles.iter().for_each(JoinHandle::abort);
         }
     }
 }

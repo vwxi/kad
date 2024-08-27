@@ -1,5 +1,5 @@
 use crate::{
-    node::KadNode,
+    node::InnerKad,
     util::{timestamp, Hash, SinglePeer},
 };
 use serde::{Deserialize, Serialize};
@@ -44,13 +44,14 @@ crate::util::pred_block! {
 pub(crate) type StoreEntry = (Entry, String);
 
 // key-value store
+#[derive(Debug)]
 pub(crate) struct Store {
     pub(crate) store: RwLock<HashMap<Hash, StoreEntry>>,
-    node: Weak<KadNode>,
+    node: Weak<InnerKad>,
 }
 
 impl Store {
-    pub(crate) fn new(node_: Weak<KadNode>) -> Self {
+    pub(crate) fn new(node_: Weak<InnerKad>) -> Self {
         Store {
             store: RwLock::new(HashMap::new()),
             node: node_,
@@ -60,7 +61,7 @@ impl Store {
     // create a new entry. use when publishing new entries
     pub(crate) fn create_new_entry(&self, data: &Value) -> StoreEntry {
         let node = self.node.upgrade().unwrap();
-        let kad = node.kad.upgrade().unwrap();
+        let kad = node.parent.upgrade().unwrap();
 
         let entry = Entry {
             value: data.clone(),
@@ -109,7 +110,7 @@ impl Store {
             .crypto
             .if_unknown(
                 &entry.0.origin.id,
-                || async { KadNode::key(node.clone(), entry.0.origin.as_peer()).is_ok() },
+                || async { InnerKad::key(node.clone(), entry.0.origin.as_peer()).is_ok() },
                 || false,
             )
             .await
@@ -123,7 +124,7 @@ impl Store {
             .crypto
             .if_unknown(
                 &sender.id,
-                || async { KadNode::key(node.clone(), sender.as_peer()).is_ok() },
+                || async { InnerKad::key(node.clone(), sender.as_peer()).is_ok() },
                 || false,
             )
             .await

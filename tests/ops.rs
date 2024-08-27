@@ -1,22 +1,21 @@
 #[cfg(test)]
 mod tests {
     use kad::{node::Kad, util::Peer};
+    use std::time::Duration;
     use tracing_test::traced_test;
 
     #[test]
     #[traced_test]
     fn serve() {
-        let kad = Kad::new(16161, false, true);
-        let handle = kad.serve().unwrap();
+        let kad = Kad::new(16152, false, true);
 
-        handle.abort();
+        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[test]
     #[traced_test]
     fn ping() {
-        let (kad1, kad2) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (kad1.clone().serve().unwrap(), kad2.clone().serve().unwrap());
+        let (kad1, kad2) = (Kad::new(16150, false, true), Kad::new(16151, false, true));
 
         let addr1 = kad1.clone().addr();
         let peer1 = Peer::new(kad1.clone().id(), addr1);
@@ -37,8 +36,5 @@ mod tests {
             assert_eq!(res.id, peer1.id);
             assert_eq!(res.addr, addr1);
         }
-
-        handle1.abort();
-        handle2.abort();
     }
 }

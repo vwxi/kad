@@ -1,5 +1,5 @@
 use crate::{
-    node::{Kad, KadNode, RealPinger},
+    node::{InnerKad, Kad, RealPinger},
     util::{Addr, FindValueResult, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use tarpc::{
     tokio_serde::formats::Json,
     transport::channel::{ChannelError, UnboundedChannel},
 };
-use tokio::{task::JoinHandle, time::timeout};
+use tokio::time::timeout;
 use tracing::{debug, error};
 
 pub(crate) mod consts {
@@ -35,7 +35,7 @@ pub(crate) trait RpcService {
 #[derive(Clone)]
 pub(crate) struct Service {
     pub(crate) client: RpcServiceClient,
-    pub(crate) node: Arc<KadNode>,
+    pub(crate) node: Arc<InnerKad>,
     pub(crate) addr: SocketAddr,
 }
 
@@ -260,36 +260,41 @@ pub(crate) trait Network {
         (server_, client_)
     }
 
-    async fn serve(node_: Arc<KadNode>) -> std::io::Result<JoinHandle<()>> {
+    async fn serve(node_: Arc<InnerKad>) -> std::io::Result<tokio::task::AbortHandle> {
         let addr = node_.addr;
+        let kad = node_.parent.upgrade().unwrap();
 
         match tarpc::serde_transport::tcp::listen(&addr.to(), Json::default).await {
-            Ok(mut listener) => Ok(tokio::spawn(async move {
-                listener.config_mut().max_frame_length(usize::MAX);
+            Ok(mut listener) => Ok(kad
+                .runtime
+                .spawn(async move {
+                    listener.config_mut().max_frame_length(usize::MAX);
 
-                debug!("now listening for calls at {:?}", addr);
+                    debug!("now listening for calls at {:?}", addr);
 
-                listener
-                    .filter_map(|r| future::ready(r.ok()))
-                    .map(|i| {
-                        let peer_addr = i.peer_addr().unwrap();
-                        let (srv, clt) = Self::spawn_twoway(i);
-                        let service = Service {
-                            client: RpcServiceClient::new(client::Config::default(), clt).spawn(),
-                            node: node_.clone(),
-                            addr: peer_addr,
-                        };
+                    listener
+                        .filter_map(|r| future::ready(r.ok()))
+                        .map(|i| {
+                            let peer_addr = i.peer_addr().unwrap();
+                            let (srv, clt) = Self::spawn_twoway(i);
+                            let service = Service {
+                                client: RpcServiceClient::new(client::Config::default(), clt)
+                                    .spawn(),
+                                node: node_.clone(),
+                                addr: peer_addr,
+                            };
 
-                        BaseChannel::with_defaults(srv)
-                            .execute(service.serve())
-                            .for_each(|resp| async move {
-                                tokio::spawn(resp);
-                            })
-                    })
-                    .buffer_unordered(10)
-                    .for_each(|()| async {})
-                    .await;
-            })),
+                            BaseChannel::with_defaults(srv)
+                                .execute(service.serve())
+                                .for_each(|resp| async move {
+                                    tokio::spawn(resp);
+                                })
+                        })
+                        .buffer_unordered(10)
+                        .for_each(|()| async {})
+                        .await;
+                })
+                .abort_handle()),
             Err(err) => Err(err),
         }
     }
@@ -364,7 +369,7 @@ impl Network for KadNetwork {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        node::{Kad, KadNode, RealPinger, ResponsiveMockPinger},
+        node::{Kad, RealPinger, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
         store::Value,
         util::{generate_peer, hash, FindValueResult, Hash, Peer},
@@ -377,17 +382,17 @@ mod tests {
     #[traced_test]
     fn key() {
         let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
-        let (handle1, handle2) = (
-            first.clone().serve().unwrap(),
-            second.clone().serve().unwrap(),
-        );
+
+        first.clone().serve().unwrap();
+        second.clone().serve().unwrap();
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
-        let _ = KadNode::key(first.node.clone(), second_peer.clone()).unwrap();
+        let _ = first.node.clone().key(second_peer.clone()).unwrap();
 
-        let keyring = first.node.crypto.keyring.blocking_read();
+        let binding = first.clone();
+        let keyring = binding.node.crypto.keyring.blocking_read();
 
         let result = keyring
             .get(&second_peer.id)
@@ -398,18 +403,17 @@ mod tests {
 
         assert_eq!(result, second.node.crypto.public_key_as_string().unwrap());
 
-        handle1.abort();
-        handle2.abort();
+        first.stop();
+        second.stop();
     }
 
     #[traced_test]
     #[test]
     fn get_addresses() {
         let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
-        let (handle1, handle2) = (
-            first.clone().serve().unwrap(),
-            second.clone().serve().unwrap(),
-        );
+
+        first.clone().serve().unwrap();
+        second.clone().serve().unwrap();
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
@@ -436,18 +440,17 @@ mod tests {
 
         assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
 
-        handle1.abort();
-        handle2.abort();
+        first.stop();
+        second.stop();
     }
 
     #[traced_test]
     #[test]
     fn store() {
         let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
-        let (handle1, handle2) = (
-            first.clone().serve().unwrap(),
-            second.clone().serve().unwrap(),
-        );
+
+        first.clone().serve().unwrap();
+        second.clone().serve().unwrap();
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
@@ -467,18 +470,17 @@ mod tests {
         );
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
-        handle1.abort();
-        handle2.abort();
+        first.stop();
+        second.stop();
     }
 
     #[traced_test]
     #[test]
     fn find_node() {
         let (first, second) = (Kad::new(16167, false, true), Kad::new(16168, false, true));
-        let (handle1, handle2) = (
-            first.clone().serve().unwrap(),
-            second.clone().serve().unwrap(),
-        );
+
+        first.clone().serve().unwrap();
+        second.clone().serve().unwrap();
 
         let to_find = Hash::from(1);
 
@@ -509,23 +511,21 @@ mod tests {
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
 
-        handle1.abort();
-        handle2.abort();
+        first.stop();
+        second.stop();
     }
 
     #[traced_test]
     #[test]
     fn find_value() {
         let (first, second) = (Kad::new(16169, false, true), Kad::new(16170, false, true));
-        let (handle1, handle2) = (
-            first.clone().serve().unwrap(),
-            second.clone().serve().unwrap(),
-        );
+        first.clone().serve().unwrap();
+        second.clone().serve().unwrap();
 
         let second_addr = second.clone().addr();
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
-        // fill second node with bullshit entries
+        // fill second node with random entries
         for i in 0..(BUCKET_SIZE - 1) {
             block_on(
                 second
@@ -595,7 +595,7 @@ mod tests {
             panic!("not a list of nodes");
         }
 
-        handle1.abort();
-        handle2.abort();
+        first.stop();
+        second.stop();
     }
 }
