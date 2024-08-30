@@ -468,6 +468,7 @@ mod tests {
                 .unwrap()
                 .0
         );
+
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
         first.stop();

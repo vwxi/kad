@@ -2,7 +2,7 @@ use crate::{
     crypto::Crypto,
     routing::{consts, RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
-    store::{Store, StoreEntry},
+    store::{consts as store_consts, Store, StoreEntry, Value},
     util::{
         hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
         SinglePeer,
@@ -22,7 +22,6 @@ use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
 use tracing::debug;
 
 // all of the different facets of the protocol
-#[derive(Debug)]
 pub(crate) struct InnerKad {
     pub(crate) addr: Addr,
     pub(crate) crypto: Crypto,
@@ -32,13 +31,12 @@ pub(crate) struct InnerKad {
 }
 
 // holds the inner node and its thread handles
-#[derive(Debug)]
 pub struct Kad {
     pub(crate) node: Arc<InnerKad>,
     pub(crate) runtime: Runtime,
     pub(crate) kad_handle: Mutex<Option<AbortHandle>>,
     pub(crate) refresh_handle: Mutex<Option<AbortHandle>>,
-    // TODO: republish handle
+    pub(crate) republish_handle: Mutex<Option<AbortHandle>>,
 }
 
 impl Kad {
@@ -51,6 +49,7 @@ impl Kad {
             Kad {
                 kad_handle: Mutex::new(None),
                 refresh_handle: Mutex::new(None),
+                republish_handle: Mutex::new(None),
                 node: n.clone(),
                 runtime: rt,
             }
@@ -58,16 +57,26 @@ impl Kad {
     }
 
     #[cfg(test)]
-    pub(crate) fn mock(id: Hash, main: bool, refresh: bool) -> Result<Arc<Self>, Box<dyn Error>> {
+    pub(crate) fn mock(
+        port: u16,
+        id: Option<Hash>,
+        main: bool,
+        refresh: bool,
+        republish: bool,
+    ) -> Result<Arc<Self>, Box<dyn Error>> {
         let rt = Runtime::new().expect("could not create Kad runtime object");
 
         let new = Arc::new_cyclic(|kad_gadget| {
             let n = Arc::new_cyclic(|innerkad_gadget| {
                 let c = Crypto::new(innerkad_gadget.clone()).expect("could not initialize crypto");
+                let hkey = hash(c.public_key_as_string().unwrap().as_str());
 
                 let kn = InnerKad {
-                    addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), 16161),
-                    table: RoutingTable::new(id, innerkad_gadget.clone()),
+                    addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    table: RoutingTable::new(
+                        if let Some(i) = id { i } else { hkey },
+                        innerkad_gadget.clone(),
+                    ),
                     store: Store::new(innerkad_gadget.clone()),
                     crypto: c,
                     parent: kad_gadget.clone(),
@@ -76,7 +85,7 @@ impl Kad {
                 // add own key
                 block_on(
                     kn.crypto.entry(
-                        id,
+                        kn.table.id,
                         kn.crypto
                             .public_key_as_string()
                             .expect("could not acquire public key for keyring")
@@ -88,35 +97,54 @@ impl Kad {
             });
 
             Kad {
-                kad_handle: Mutex::new(if main {
-                    // ignore error because testing
-                    Some(n.clone().serve().unwrap())
-                } else {
-                    None
-                }),
-                refresh_handle: Mutex::new(if refresh {
-                    let nc = n.clone();
-                    Some(
-                        rt.spawn(async move {
-                            sleep(Duration::from_secs(consts::REFRESH_INTERVAL as u64)).await;
-                            nc.table.clone().refresh_tree::<RealPinger>().await;
-                        })
-                        .abort_handle(),
-                    )
-                } else {
-                    None
-                }),
+                kad_handle: Mutex::new(None),
+                refresh_handle: Mutex::new(None),
+                republish_handle: Mutex::new(None),
                 node: n.clone(),
                 runtime: rt,
             }
         });
+
+        if main {
+            let mut lock = new.kad_handle.blocking_lock();
+            *lock = Some(new.node.clone().serve()?);
+        }
+
+        if refresh {
+            let mut lock = new.refresh_handle.blocking_lock();
+            let sc = new.clone();
+            *lock = Some(
+                new.runtime
+                    .handle()
+                    .spawn(async move {
+                        loop {
+                            sc.node.clone().refresh_buckets().await;
+                        }
+                    })
+                    .abort_handle(),
+            );
+        }
+
+        if republish {
+            let mut lock = new.republish_handle.blocking_lock();
+            let sc = new.clone();
+            *lock = Some(
+                new.runtime
+                    .handle()
+                    .spawn(async move {
+                        loop {
+                            sc.node.clone().republish_entries().await;
+                        }
+                    })
+                    .abort_handle(),
+            );
+        }
 
         Ok(new)
     }
 
     pub fn serve(self: Arc<Self>) -> std::io::Result<()> {
         let rt = self.runtime.handle();
-        let nc = self.node.clone();
 
         {
             let mut lock = self.kad_handle.blocking_lock();
@@ -125,10 +153,25 @@ impl Kad {
 
         {
             let mut lock = self.refresh_handle.blocking_lock();
+            let sc = self.clone();
             *lock = Some(
                 rt.spawn(async move {
-                    sleep(Duration::from_secs(consts::REFRESH_INTERVAL as u64)).await;
-                    nc.table.clone().refresh_tree::<RealPinger>().await;
+                    loop {
+                        sc.node.clone().refresh_buckets().await;
+                    }
+                })
+                .abort_handle(),
+            );
+        }
+
+        {
+            let mut lock = self.republish_handle.blocking_lock();
+            let sc = self.clone();
+            *lock = Some(
+                rt.spawn(async move {
+                    loop {
+                        sc.node.clone().republish_entries().await;
+                    }
                 })
                 .abort_handle(),
             );
@@ -142,14 +185,14 @@ impl Kad {
             {
                 let lock = r.kad_handle.blocking_lock();
                 if let Some(x) = lock.as_ref() {
-                    x.abort()
+                    x.abort();
                 }
             }
 
             {
                 let lock = r.refresh_handle.blocking_lock();
                 if let Some(x) = lock.as_ref() {
-                    x.abort()
+                    x.abort();
                 }
             }
         }
@@ -280,6 +323,7 @@ macro_rules! kad_fn {
 // TODO: join mechanism
 // TODO: republish mechanism
 // TODO: iterative store mechanism
+// TODO: get/put wrappers (put should store in own store first)
 impl InnerKad {
     // TODO: implement non-local forwarding of some sort
     pub(crate) fn new(port: u16, ipv6: bool, local: bool, k: Weak<Kad>) -> Arc<InnerKad> {
@@ -325,9 +369,40 @@ impl InnerKad {
     }
 
     pub(crate) fn serve(self: Arc<Self>) -> std::io::Result<tokio::task::AbortHandle> {
-        let kad = self.parent.upgrade().unwrap();
+        let parent = self.parent.upgrade().unwrap();
 
-        kad.runtime.handle().block_on(KadNetwork::serve(self))
+        parent.runtime.handle().block_on(KadNetwork::serve(self))
+    }
+
+    pub(crate) async fn refresh_buckets(self: Arc<Self>) {
+        sleep(Duration::from_secs(consts::REFRESH_INTERVAL as u64)).await;
+        self.table.clone().refresh_tree::<RealPinger>().await;
+    }
+
+    pub(crate) async fn republish_entries(self: Arc<Self>) {
+        sleep(Duration::from_secs(store_consts::REPUBLISH_INTERVAL as u64)).await;
+
+        let ts = timestamp();
+
+        let parent = self.parent.upgrade().unwrap();
+
+        for e in self
+            .store
+            .for_all(|key: Hash, entry: StoreEntry| {
+                let sc = self.clone();
+
+                async move {
+                    if ts - entry.0.timestamp > store_consts::REPUBLISH_TIME {
+                        Some(sc.republish(key, entry.clone()).await)
+                    } else {
+                        None
+                    }
+                }
+            })
+            .await
+        {
+            self.store.put(parent.as_single_peer(), e.0, e.1).await;
+        }
     }
 
     // key, get_addresses and ping do not update routing table
@@ -442,6 +517,42 @@ impl InnerKad {
         },
         (id: Hash)
     );
+
+    // returns a list with all nodes that have not responded
+    async fn iter_store(self: Arc<Self>, key: Hash, entry: StoreEntry) -> Vec<SinglePeer> {
+        let mut bad_peers: Vec<SinglePeer> = vec![];
+
+        for peer in self.clone().iter_find_node(key).await {
+            debug!("storing at {:#x}", peer.id);
+            tokio::task::block_in_place(|| {
+                if let Err(bad) = self.clone().store(peer, key, entry.clone()) {
+                    bad_peers.push(*bad);
+                }
+            });
+        }
+
+        bad_peers
+    }
+
+    async fn iter_store_new(self: Arc<Self>, key: Hash, value: Value) -> Vec<SinglePeer> {
+        let entry = self.clone().store.create_new_entry(&value);
+        let parent = self.parent.upgrade().unwrap();
+
+        // store in own store first
+        self.store
+            .put(parent.as_single_peer(), key, entry.clone())
+            .await;
+
+        self.iter_store(key, entry).await
+    }
+
+    async fn republish(self: Arc<Self>, key: Hash, entry: StoreEntry) -> (Hash, StoreEntry) {
+        let new_entry = self.store.republish_entry(entry);
+
+        self.iter_store(key, new_entry.clone()).await;
+
+        (key, new_entry)
+    }
 }
 
 pub(crate) trait Pinger {
@@ -481,15 +592,12 @@ impl Pinger for UnresponsiveMockPinger {
 mod tests {
     use tracing_test::traced_test;
 
-    use crate::routing::consts;
-
     use super::*;
 
-    #[traced_test]
-    #[test]
-    fn refresh() {
-        let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(18000 + i, false, true)).collect();
-        nodes.iter().for_each(|x| x.clone().serve().unwrap());
+    fn setup(offset: u16) -> Vec<Arc<Kad>> {
+        let nodes: Vec<Arc<Kad>> = (0..4)
+            .map(|i| Kad::mock(offset + i, None, true, false, false).unwrap())
+            .collect();
 
         // send find_nodes
         // A <-> B
@@ -499,21 +607,30 @@ mod tests {
             .clone()
             .find_node(nodes[1].as_peer(), Hash::from(1));
         // A <-> C
-        debug!("A -> C");
+        debug!("A <-> C");
         let _ = nodes[0]
             .node
             .clone()
             .find_node(nodes[2].as_peer(), Hash::from(1));
         // C <-> D
-        debug!("C -> D");
+        debug!("C <-> D");
         let _ = nodes[2]
             .node
             .clone()
             .find_node(nodes[3].as_peer(), Hash::from(1));
 
-        std::thread::sleep(tokio::time::Duration::from_secs(consts::REFRESH_TIME));
+        nodes
+    }
 
-        block_on(nodes[1].node.table.clone().refresh_tree::<RealPinger>());
+    #[traced_test]
+    #[test]
+    fn refresh() {
+        let nodes = setup(18000);
+
+        nodes[1]
+            .runtime
+            .handle()
+            .block_on(nodes[1].node.clone().refresh_buckets());
 
         let bkt = block_on(nodes[1].node.table.clone().find_bucket(Hash::from(1)));
 
@@ -524,6 +641,73 @@ mod tests {
                 || x.id == nodes[3].node.table.id),
             "checking if bucket contains all nodes"
         );
+
+        nodes.into_iter().for_each(Kad::stop);
+    }
+
+    #[traced_test]
+    #[test]
+    fn iter_store() {
+        let nodes = setup(18010);
+
+        assert!(block_on(
+            nodes[0]
+                .node
+                .clone()
+                .iter_store_new(hash("good morning"), Value::Data(String::from("hello"))),
+        )
+        .is_empty()); // none of them should fail
+
+        // check if every node got the value
+        assert!(nodes
+            .iter()
+            .all(|n| { block_on(n.node.store.get(&hash("good morning"))).is_some() }));
+
+        nodes.into_iter().for_each(Kad::stop);
+    }
+
+    #[traced_test]
+    #[test]
+    fn republish() {
+        let nodes = setup(18020);
+
+        let entry = nodes[0]
+            .node
+            .store
+            .create_new_entry(&Value::Data(String::from("hello")));
+        assert!(block_on(nodes[0].clone().node.store.put(
+            nodes[0].as_single_peer(),
+            hash("good morning"),
+            entry.clone()
+        )));
+
+        assert!(nodes[0]
+            .node
+            .clone()
+            .store(nodes[1].as_peer(), hash("good morning"), entry.clone())
+            .is_ok());
+
+        // republishing should happen
+        std::thread::sleep(Duration::from_secs(1));
+        nodes[0]
+            .runtime
+            .handle()
+            .block_on(nodes[0].node.clone().republish_entries());
+
+        // get from republishee
+        let new = block_on(nodes[2].node.store.get(&hash("good morning"))).unwrap();
+
+        // check if updated
+        assert!(new.0.timestamp > entry.0.timestamp);
+
+        // check if everyone got the new value
+        nodes.iter().for_each(|n| {
+            debug!("checking node {:#x}", n.id());
+            assert_eq!(
+                block_on(n.node.store.get(&hash("good morning"))).unwrap(),
+                new
+            );
+        });
 
         nodes.into_iter().for_each(Kad::stop);
     }

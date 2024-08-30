@@ -173,7 +173,6 @@ impl Trie {
     }
 }
 
-// TODO: refresh mechanism
 impl RoutingTable {
     pub(crate) fn new(i: Hash, n: Weak<InnerKad>) -> TableRef {
         Arc::new(RoutingTable {
@@ -215,7 +214,6 @@ impl RoutingTable {
             let current = inner.read().await;
 
             if let (None, None, Some(_)) = (&current.left, &current.right, &current.bucket) {
-                debug!("reached leaf");
                 drop(current);
                 f(self, inner.to_owned()).await;
                 return;
@@ -586,7 +584,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn add_single_peer() {
-        let kad = Kad::mock(rand::random(), false, false).unwrap();
+        let kad = Kad::mock(16161, rand::random(), false, false, false).unwrap();
 
         let table = kad.node.table.clone();
 
@@ -644,7 +642,14 @@ mod tests {
     #[traced_test]
     #[test]
     fn split() {
-        let kad = Kad::mock(Hash::from(1) << (consts::HASH_SIZE - 1), false, false).unwrap();
+        let kad = Kad::mock(
+            16161,
+            Some(Hash::from(1) << (consts::HASH_SIZE - 1)),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {
@@ -722,7 +727,14 @@ mod tests {
     #[traced_test]
     #[test]
     fn far_responsive() {
-        let kad = Kad::mock(Hash::from(1) << (consts::HASH_SIZE - 1), false, false).unwrap();
+        let kad = Kad::mock(
+            16161,
+            Some(Hash::from(1) << (consts::HASH_SIZE - 1)),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {
@@ -764,7 +776,14 @@ mod tests {
     #[traced_test]
     #[test]
     fn far_unresponsive() {
-        let kad = Kad::mock(Hash::from(1) << (consts::HASH_SIZE - 1), false, false).unwrap();
+        let kad = Kad::mock(
+            16161,
+            Some(Hash::from(1) << (consts::HASH_SIZE - 1)),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         let table = kad.node.table.clone();
 
         for i in 0..consts::BUCKET_SIZE {

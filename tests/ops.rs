@@ -10,6 +10,8 @@ mod tests {
         let kad = Kad::new(16152, false, true);
 
         std::thread::sleep(Duration::from_secs(1));
+
+        kad.stop();
     }
 
     #[test]
@@ -36,5 +38,8 @@ mod tests {
             assert_eq!(res.id, peer1.id);
             assert_eq!(res.addr, addr1);
         }
+
+        kad1.stop();
+        kad2.stop();
     }
 }

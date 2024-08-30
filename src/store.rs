@@ -2,20 +2,23 @@ use crate::{
     node::InnerKad,
     util::{timestamp, Hash, SinglePeer},
 };
+use futures::Future;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Weak};
 use tokio::sync::RwLock;
 
-pub(crate) const REPUBLISH_TIME: u64 = 86400;
-
 pub(crate) mod consts {
+    pub(crate) const MAX_ENTRY_SIZE: usize = 65535;
+
     crate::util::pred_block! {
         #[cfg(test)] {
-            pub(in super) const REPUBLISH_INTERVAL: usize = 10;
+            pub(crate) const REPUBLISH_TIME: u64 = 3;
+            pub(crate) const REPUBLISH_INTERVAL: usize = 3;
         }
 
         #[cfg(not(test))] {
-            pub(in super) const REPUBLISH_INTERVAL: usize = 86400;
+            pub(crate) const REPUBLISH_TIME: u64 = 86400;
+            pub(crate) const REPUBLISH_INTERVAL: usize = 86400;
         }
     }
 }
@@ -44,12 +47,12 @@ crate::util::pred_block! {
 pub(crate) type StoreEntry = (Entry, String);
 
 // key-value store
-#[derive(Debug)]
 pub(crate) struct Store {
     pub(crate) store: RwLock<HashMap<Hash, StoreEntry>>,
     node: Weak<InnerKad>,
 }
 
+// TODO: store value compression
 impl Store {
     pub(crate) fn new(node_: Weak<InnerKad>) -> Self {
         Store {
@@ -104,6 +107,13 @@ impl Store {
 
     pub(crate) async fn validate(&self, sender: &SinglePeer, entry: &StoreEntry) -> bool {
         let node = self.node.upgrade().unwrap();
+
+        // check if data is larger than maximum accepted size
+        if let Value::Data(s) = &entry.0.value {
+            if s.len() > consts::MAX_ENTRY_SIZE {
+                return false;
+            }
+        }
 
         // determine if origin key exists in keyring,
         if node
@@ -162,7 +172,7 @@ impl Store {
         let ts = timestamp();
 
         // check if entry timestamp is not older than allowed time
-        if ts - entry.0.timestamp > REPUBLISH_TIME {
+        if ts - entry.0.timestamp > consts::REPUBLISH_TIME {
             return false;
         }
 
@@ -183,6 +193,7 @@ impl Store {
 
         // add to hash table
         let mut lock = self.store.write().await;
+
         lock.insert(key, entry);
 
         true
@@ -191,8 +202,25 @@ impl Store {
     // get does not re-sign entry, re-signing is for republishing only
     pub(crate) async fn get(&self, key: &Hash) -> Option<StoreEntry> {
         let lock = self.store.read().await;
-
         lock.get(key).cloned()
+    }
+
+    // iterate through store and return all entries that need to be updated
+    pub(crate) async fn for_all<F, Fut>(&self, f: F) -> Vec<(Hash, StoreEntry)>
+    where
+        Fut: Future<Output = Option<(Hash, StoreEntry)>>,
+        F: Fn(Hash, StoreEntry) -> Fut,
+    {
+        let lock = self.store.read().await;
+        let mut to_put: Vec<(Hash, StoreEntry)> = vec![];
+
+        for entry in lock.iter() {
+            if let Some(e) = f(*entry.0, entry.1.clone()).await {
+                to_put.push(e);
+            }
+        }
+
+        to_put
     }
 }
 
@@ -203,7 +231,7 @@ mod tests {
 
     use crate::{
         node::Kad,
-        store::{ProviderRecord, Value, REPUBLISH_TIME},
+        store::{consts::REPUBLISH_TIME, ProviderRecord, Value},
         util::{hash, timestamp, Hash},
     };
 

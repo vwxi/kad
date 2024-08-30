@@ -284,16 +284,18 @@ impl InnerKad {
         let mut po: Vec<SinglePeer> = Vec::new();
 
         // search for key in local store, if Q==0,1 then the search is complete
-        if let Some(val) = self.store.get(&key).await {
-            if quorum < 2 {
-                debug!("quorum < 2, found value in local store, search is complete");
-                return FindValueResult::Value(Box::new(val));
-            }
+        {
+            if let Some(val) = self.store.get(&key).await {
+                if quorum < 2 {
+                    debug!("quorum < 2, found value in local store, search is complete");
+                    return FindValueResult::Value(Box::new(val));
+                }
 
-            // otherwise, we count it as a found value
-            found_count.fetch_add(1, Ordering::Relaxed);
-            best = FindValueResult::Value(Box::new(val));
-            debug!("found already in local store, counting as a valid result");
+                // otherwise, we count it as a found value
+                found_count.fetch_add(1, Ordering::Relaxed);
+                best = FindValueResult::Value(Box::new(val));
+                debug!("found already in local store, counting as a valid result");
+            }
         }
 
         // `pn` will have been seeded with `alpha` initial peers
@@ -596,6 +598,7 @@ mod tests {
                 hash("good morning"),
                 first_entry.clone(),
             )));
+
             // B just has value
             assert!(block_on(nodes[1].node.store.put(
                 nodes[1].as_single_peer(),
