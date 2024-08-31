@@ -18,11 +18,6 @@ use crate::{
     util::{FindValueResult, Hash, Peer, SinglePeer},
 };
 
-pub(crate) mod consts {
-    pub(crate) const DISJOINT_PATHS: usize = 3;
-    pub(crate) const QUORUM: usize = 3;
-}
-
 impl InnerKad {
     // xlattice-style lookup
     pub(crate) fn lookup_nodes(
@@ -445,8 +440,7 @@ impl InnerKad {
 #[cfg(test)]
 mod tests {
     use crate::{
-        lookup::consts,
-        node::Kad,
+        node::{consts, Kad},
         store::Value,
         util::{hash, FindValueResult, Hash},
     };

@@ -25,21 +25,21 @@ pub(crate) mod consts {
 
 crate::util::pred_block! {
     #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)] {
-        pub(in crate) struct ProviderRecord {
-            pub(in crate) provider: Hash,
-            pub(in crate) expiry: u64,
+        pub struct ProviderRecord {
+            pub provider: Hash,
+            pub expiry: u64,
         }
 
-        pub(in crate) enum Value {
+        pub enum Value {
             Data(String),
             ProviderRecord(ProviderRecord),
         }
 
-        pub(in crate) struct Entry {
-            pub(in crate) value: Value,
-            pub(in crate) signature: String,
-            pub(in crate) origin: SinglePeer,
-            pub(in crate) timestamp: u64,
+        pub struct Entry {
+            pub value: Value,
+            pub signature: String,
+            pub origin: SinglePeer,
+            pub timestamp: u64,
         }
     }
 }

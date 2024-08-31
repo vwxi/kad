@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use kad::{node::Kad, util::Peer};
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
     use tracing_test::traced_test;
 
     #[test]
@@ -41,5 +41,16 @@ mod tests {
 
         kad1.stop();
         kad2.stop();
+    }
+
+    #[test]
+    #[traced_test]
+    #[ignore]
+    fn put_then_get() {
+        let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(16000 + i, false, true)).collect();
+
+        nodes.into_iter().for_each(Kad::stop);
+
+        todo!();
     }
 }

@@ -1,8 +1,8 @@
 use crate::{
     crypto::Crypto,
-    routing::{consts, RoutingTable, TableRef},
+    routing::{consts as routing_consts, RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
-    store::{consts as store_consts, Store, StoreEntry, Value},
+    store::{consts as store_consts, Entry, ProviderRecord, Store, StoreEntry, Value},
     util::{
         hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
         SinglePeer,
@@ -10,7 +10,7 @@ use crate::{
     U256,
 };
 use futures::executor::block_on;
-#[cfg(test)]
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::sync::{Arc, Weak};
 use std::{
@@ -20,6 +20,11 @@ use std::{
 use tarpc::context;
 use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
 use tracing::debug;
+
+pub(crate) mod consts {
+    pub(crate) const DISJOINT_PATHS: usize = 3;
+    pub(crate) const QUORUM: usize = 3;
+}
 
 // all of the different facets of the protocol
 pub(crate) struct InnerKad {
@@ -220,6 +225,73 @@ impl Kad {
     pub fn as_peer(self: &Arc<Self>) -> Peer {
         self.as_single_peer().as_peer()
     }
+
+    pub fn put<'a, T: Serialize + Deserialize<'a>>(
+        self: &Arc<Self>,
+        key: &str,
+        value: T,
+    ) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
+        match serde_json::to_string(&value) {
+            Ok(v) => Ok(self
+                .runtime
+                .handle()
+                .block_on(self.node.clone().iter_store_new(hash(key), Value::Data(v)))),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
+        let record = self
+            .node
+            .store
+            .create_new_entry(&Value::ProviderRecord(ProviderRecord {
+                provider: self.id(),
+                expiry: timestamp() + store_consts::REPUBLISH_TIME,
+            }));
+
+        self.put(key, record)
+    }
+
+    pub fn get(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<Entry> {
+        let h = hash(key);
+        let rt = self.runtime.handle();
+
+        let results: Vec<FindValueResult> = if disjoint {
+            rt.block_on(self.node.clone().disjoint_lookup_value(
+                h,
+                consts::DISJOINT_PATHS,
+                consts::QUORUM,
+            ))
+        } else {
+            let peers = rt.block_on(self.node.table.clone().find_alpha_peers(h));
+
+            vec![rt.block_on(
+                self.node
+                    .clone()
+                    .lookup_value(peers, None, h, consts::QUORUM),
+            )]
+        };
+
+        results
+            .iter()
+            .filter_map(|r| match r {
+                FindValueResult::Value(val) => Some((**val).0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
+        let result = self.get(key, disjoint);
+
+        result
+            .iter()
+            .filter_map(|r| match &r.value {
+                Value::ProviderRecord(record) => Some(record.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 macro_rules! kad_fn {
@@ -321,8 +393,6 @@ macro_rules! kad_fn {
 }
 
 // TODO: join mechanism
-// TODO: republish mechanism
-// TODO: iterative store mechanism
 // TODO: get/put wrappers (put should store in own store first)
 impl InnerKad {
     // TODO: implement non-local forwarding of some sort
@@ -375,7 +445,7 @@ impl InnerKad {
     }
 
     pub(crate) async fn refresh_buckets(self: Arc<Self>) {
-        sleep(Duration::from_secs(consts::REFRESH_INTERVAL as u64)).await;
+        sleep(Duration::from_secs(routing_consts::REFRESH_INTERVAL as u64)).await;
         self.table.clone().refresh_tree::<RealPinger>().await;
     }
 
