@@ -637,6 +637,31 @@ impl InnerKad {
 
         addresses
     }
+
+    pub(crate) async fn join(self: Arc<Self>, addr: Addr) -> Result<(), ()> {
+        if let Ok(peer) = self.clone().ping(Peer::new(Hash::zero(), addr)) {
+            self.table.clone().update::<RealPinger>(peer).await;
+
+            let res = self.clone().iter_find_node(self.clone().table.id).await;
+
+            // initially populate routing table
+            for p in res {
+                for a in p.addresses {
+                    self.table
+                        .clone()
+                        .update::<RealPinger>(SinglePeer::new(p.id, a.0))
+                        .await;
+                }
+            }
+
+            // perform refreshing
+            self.table.clone().refresh_tree::<RealPinger>().await;
+
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 pub(crate) trait Pinger {

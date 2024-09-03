@@ -45,12 +45,28 @@ mod tests {
 
     #[test]
     #[traced_test]
-    #[ignore]
     fn put_then_get() {
         let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(16000 + i, false, true)).collect();
-
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
         todo!();
+
+        let res = nodes[0].put("good morning", "hello").unwrap();
+
+        // make sure all recipients accepted value
+        assert!(res.is_empty());
+
+        let res = nodes[3].get("good morning", true);
+
+        assert!(!res.is_empty());
+
+        assert!(res
+            .iter()
+            .fold(res.first(), |acc, item| {
+                acc.and_then(|s| if s == item { Some(s) } else { None })
+            })
+            .is_some());
+
+        nodes.into_iter().for_each(Kad::stop);
     }
 }
