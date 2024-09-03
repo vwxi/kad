@@ -393,7 +393,7 @@ macro_rules! kad_fn {
 }
 
 // TODO: join mechanism
-// TODO: get/put wrappers (put should store in own store first)
+// TODO: resolve mechanism
 impl InnerKad {
     // TODO: implement non-local forwarding of some sort
     pub(crate) fn new(port: u16, ipv6: bool, local: bool, k: Weak<Kad>) -> Arc<InnerKad> {
@@ -623,6 +623,20 @@ impl InnerKad {
 
         (key, new_entry)
     }
+
+    pub(crate) async fn resolve(self: Arc<Self>, key: Hash) -> Vec<Addr> {
+        let mut addresses: Vec<Addr> = vec![];
+
+        for peer in self.clone().iter_find_node(key).await {
+            if let Ok((addrs, _)) = self.clone().get_addresses(peer, key) {
+                addresses.extend(addrs.iter());
+            }
+        }
+
+        addresses.dedup();
+
+        addresses
+    }
 }
 
 pub(crate) trait Pinger {
@@ -660,6 +674,8 @@ impl Pinger for UnresponsiveMockPinger {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use tracing_test::traced_test;
 
     use super::*;
@@ -778,6 +794,34 @@ mod tests {
                 new
             );
         });
+
+        nodes.into_iter().for_each(Kad::stop);
+    }
+
+    #[traced_test]
+    #[test]
+    fn resolve() {
+        let nodes = setup(18030);
+
+        for i in 0..(routing_consts::ADDRESS_LIMIT as u16 - 1) {
+            block_on(
+                nodes[1]
+                    .node
+                    .table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(SinglePeer::new(
+                        nodes[0].id(),
+                        Addr(
+                            IpAddr::V4(Ipv4Addr::from_str("127.0.0.1").unwrap()),
+                            6969 + i,
+                        ),
+                    )),
+            );
+        }
+
+        let res = block_on(nodes[2].node.clone().resolve(nodes[0].id()));
+
+        assert_eq!(res.len(), routing_consts::ADDRESS_LIMIT);
 
         nodes.into_iter().for_each(Kad::stop);
     }

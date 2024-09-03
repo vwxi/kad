@@ -311,7 +311,7 @@ impl RoutingTable {
                     .unwrap()
                     .addresses
                     .iter()
-                    .position(|x| x.0 == peer.addr)
+                    .position(|x| dbg!(x.0) == dbg!(peer.addr))
                 {
                     let addr_entry = bkt
                         .peers
@@ -334,6 +334,7 @@ impl RoutingTable {
                                 .1 -= 1;
                         }
 
+                        // move addr to back
                         {
                             let bkt_entry = bkt.peers.get_mut(bkt_idx).unwrap();
 
@@ -341,6 +342,7 @@ impl RoutingTable {
                             bkt_entry.addresses.push(t);
                         }
 
+                        // move peer to back
                         {
                             let t = bkt.peers.remove(bkt_idx);
                             bkt.peers.push(t);
@@ -387,6 +389,12 @@ impl RoutingTable {
                         );
 
                         bkt_entry.addresses.push((peer.addr, 0));
+                    }
+
+                    // move peer to back
+                    {
+                        let t = bkt.peers.remove(bkt_idx);
+                        bkt.peers.push(t);
                     }
                 }
             }
@@ -465,7 +473,6 @@ impl RoutingTable {
             let exists = bkt.peers.iter().any(|x| x.id == peer.id);
             let fits = bkt.peers.len() < consts::BUCKET_SIZE;
             let nearby = (peer.id & mask) == (self.id & mask);
-            let root = trie.cutoff == 0;
 
             // bucket is not full and peer doesnt exist yet, add to bucket
             if !exists && fits {
@@ -473,8 +480,7 @@ impl RoutingTable {
                 bkt.add_peer(peer);
             } else if exists {
                 // make sure it is not root node
-                #[allow(clippy::if_not_else)]
-                if nearby != root {
+                if nearby {
                     // bucket is full but nearby, update node
                     debug!("bucket is full but nearby, update node");
                     bkt.update_nearby(peer);
@@ -560,7 +566,6 @@ impl RoutingTable {
 
             if let Some(bkt) = &lock.bucket {
                 if timestamp() - bkt.last_seen > consts::REFRESH_TIME {
-                    debug!("refreshed bucket {:#x}", lock.cutoff);
                     drop(lock);
                     s.refresh::<P>(Some(i)).await;
                 }

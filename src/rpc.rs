@@ -368,14 +368,17 @@ impl Network for KadNetwork {}
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use crate::{
         node::{Kad, RealPinger, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
         store::Value,
-        util::{generate_peer, hash, FindValueResult, Hash, Peer},
+        util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer},
     };
     use futures::executor::block_on;
     use rsa::pkcs1::EncodeRsaPublicKey;
+    use tracing::debug;
     use tracing_test::traced_test;
 
     #[test]
@@ -419,13 +422,17 @@ mod tests {
         let second_peer = Peer::new(second.clone().id(), second_addr);
 
         // add addresses
-        for _ in 0..=3 {
+        for i in 0..=3 {
+            debug!("adding {}", 8000 + i);
             block_on(
                 second
                     .node
                     .table
                     .clone()
-                    .update::<RealPinger>(generate_peer(Some(Hash::from(1)))),
+                    .update::<ResponsiveMockPinger>(SinglePeer::new(
+                        Hash::from(1),
+                        Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000 + i),
+                    )),
             );
         }
 
@@ -438,6 +445,8 @@ mod tests {
             .unwrap()
             .0;
 
+        assert_eq!(reference.addresses.len(), 4);
+        assert_eq!(res.len(), 4);
         assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
 
         first.stop();
