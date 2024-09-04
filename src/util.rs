@@ -178,7 +178,7 @@ pub(crate) enum FindValueResult {
 pub(crate) enum RpcResult {
     Bad,
     Key(String),
-    Ping,
+    Ping(Hash),
     Store,
     GetAddresses(Option<Vec<Addr>>),
     FindNode(Vec<SinglePeer>),

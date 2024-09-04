@@ -292,6 +292,10 @@ impl Kad {
             })
             .collect()
     }
+
+    pub fn join(self: &Arc<Self>, addr: Addr) -> bool {
+        self.runtime.handle().block_on(self.node.clone().join(addr))
+    }
 }
 
 macro_rules! kad_fn {
@@ -359,7 +363,7 @@ macro_rules! kad_fn {
                     Ok((conn, responding_peer)) => {
                         if self.crypto.if_unknown(&responding_peer.id, || async {
                             if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
-                                if hash(key.as_str()) == responding_peer.id {
+                                if dbg!(hash(key.as_str())) == dbg!(responding_peer.id) {
                                     self.crypto.entry(responding_peer.id, key.as_str()).await
                                 } else {
                                     false
@@ -392,8 +396,6 @@ macro_rules! kad_fn {
     }
 }
 
-// TODO: join mechanism
-// TODO: resolve mechanism
 impl InnerKad {
     // TODO: implement non-local forwarding of some sort
     pub(crate) fn new(port: u16, ipv6: bool, local: bool, k: Weak<Kad>) -> Arc<InnerKad> {
@@ -517,8 +519,9 @@ impl InnerKad {
         ping,
         RpcOp::Ping,
         SinglePeer,
-        |_, res: RpcResults, resp: SinglePeer| async move {
-            if let RpcResult::Ping = res.0 {
+        |_, res: RpcResults, mut resp: SinglePeer| async move {
+            if let RpcResult::Ping(id) = res.0 {
+                resp.id = id;
                 Ok(resp)
             } else {
                 Err(Box::new(resp))
@@ -638,8 +641,10 @@ impl InnerKad {
         addresses
     }
 
-    pub(crate) async fn join(self: Arc<Self>, addr: Addr) -> Result<(), ()> {
-        if let Ok(peer) = self.clone().ping(Peer::new(Hash::zero(), addr)) {
+    pub(crate) async fn join(self: Arc<Self>, addr: Addr) -> bool {
+        if let Ok(peer) =
+            tokio::task::block_in_place(|| self.clone().ping(Peer::new(Hash::zero(), addr)))
+        {
             self.table.clone().update::<RealPinger>(peer).await;
 
             let res = self.clone().iter_find_node(self.clone().table.id).await;
@@ -657,10 +662,10 @@ impl InnerKad {
             // perform refreshing
             self.table.clone().refresh_tree::<RealPinger>().await;
 
-            Ok(())
-        } else {
-            Err(())
+            return true;
         }
+
+        false
     }
 }
 

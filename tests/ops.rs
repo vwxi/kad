@@ -45,11 +45,13 @@ mod tests {
 
     #[test]
     #[traced_test]
-    fn put_then_get() {
-        let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(16000 + i, false, true)).collect();
+    fn join_put_get() {
+        let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(16010 + i, false, true)).collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
-        todo!();
+        for i in &nodes[1..] {
+            assert!(i.join(nodes[0].addr()));
+        }
 
         let res = nodes[0].put("good morning", "hello").unwrap();
 
@@ -59,7 +61,6 @@ mod tests {
         let res = nodes[3].get("good morning", true);
 
         assert!(!res.is_empty());
-
         assert!(res
             .iter()
             .fold(res.first(), |acc, item| {

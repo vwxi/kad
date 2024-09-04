@@ -108,7 +108,9 @@ impl RpcService for Service {
 
     // pings are not identification. we're just seeing if we speak the same language
     async fn ping(self, _: context::Context) -> RpcResults {
-        self.node.crypto.results(RpcResult::Ping)
+        self.node
+            .crypto
+            .results(RpcResult::Ping(self.node.table.id))
     }
 
     // get_addresses will NOT verify any args and will NOT return any signature
@@ -371,7 +373,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use crate::{
-        node::{Kad, RealPinger, ResponsiveMockPinger},
+        node::{Kad, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
         store::Value,
         util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer},
