@@ -450,7 +450,9 @@ mod tests {
     use tracing_test::traced_test;
 
     fn setup(offset: u16) -> Vec<Arc<Kad>> {
-        let nodes: Vec<Arc<Kad>> = (0..5).map(|i| Kad::new(offset + i, false, true)).collect();
+        let nodes: Vec<Arc<Kad>> = (0..5)
+            .map(|i| Kad::new(offset + i, false, true).unwrap())
+            .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
         // send find_nodes in this sequence:
@@ -508,6 +510,8 @@ mod tests {
     }
 
     mod lookup_value {
+        use crate::store::Data;
+
         use super::*;
 
         // intersecting lookup with no/one valid value
@@ -538,7 +542,7 @@ mod tests {
                 let first_entry = nodes[0]
                     .node
                     .store
-                    .create_new_entry(&Value::Data(String::from("hello")));
+                    .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
                 let _ = nodes[0].node.clone().store(
                     nodes[1].as_peer(),
@@ -579,7 +583,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(&Value::Data(String::from("hello")));
+                .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
             // allow there to be a time difference
             std::thread::sleep(tokio::time::Duration::from_secs(1));
@@ -644,7 +648,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(&Value::Data(String::from("hello")));
+                .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
             assert!(block_on(nodes[1].node.store.put(
                 nodes[0].as_single_peer(),

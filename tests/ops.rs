@@ -7,7 +7,7 @@ mod tests {
     #[test]
     #[traced_test]
     fn serve() {
-        let kad = Kad::new(16152, false, true);
+        let kad = Kad::new(16152, false, true).unwrap();
 
         std::thread::sleep(Duration::from_secs(1));
 
@@ -17,7 +17,10 @@ mod tests {
     #[test]
     #[traced_test]
     fn ping() {
-        let (kad1, kad2) = (Kad::new(16150, false, true), Kad::new(16151, false, true));
+        let (kad1, kad2) = (
+            Kad::new(16150, false, true).unwrap(),
+            Kad::new(16151, false, true).unwrap(),
+        );
 
         let addr1 = kad1.clone().addr();
         let peer1 = Peer::new(kad1.clone().id(), addr1);
@@ -46,14 +49,16 @@ mod tests {
     #[test]
     #[traced_test]
     fn join_put_get() {
-        let nodes: Vec<Arc<Kad>> = (0..4).map(|i| Kad::new(16010 + i, false, true)).collect();
+        let nodes: Vec<Arc<Kad>> = (0..4)
+            .map(|i| Kad::new(16010 + i, false, true).unwrap())
+            .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
         for i in &nodes[1..] {
             assert!(i.join(nodes[0].addr()));
         }
 
-        let res = nodes[0].put("good morning", "hello").unwrap();
+        let res = nodes[0].put("good morning", "hello", false).unwrap();
 
         // make sure all recipients accepted value
         assert!(res.is_empty());

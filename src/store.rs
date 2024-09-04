@@ -30,8 +30,13 @@ crate::util::pred_block! {
             pub expiry: u64,
         }
 
+        pub enum Data {
+            Raw(String),
+            Compressed(String)
+        }
+
         pub enum Value {
-            Data(String),
+            Data(Data),
             ProviderRecord(ProviderRecord),
         }
 
@@ -110,8 +115,12 @@ impl Store {
 
         // check if data is larger than maximum accepted size
         if let Value::Data(s) = &entry.0.value {
-            if s.len() > consts::MAX_ENTRY_SIZE {
-                return false;
+            match s {
+                Data::Raw(st) | Data::Compressed(st) => {
+                    if st.len() > consts::MAX_ENTRY_SIZE {
+                        return false;
+                    }
+                }
             }
         }
 
@@ -231,18 +240,18 @@ mod tests {
 
     use crate::{
         node::Kad,
-        store::{consts::REPUBLISH_TIME, ProviderRecord, Value},
+        store::{consts::REPUBLISH_TIME, Data, ProviderRecord, Value},
         util::{hash, timestamp, Hash},
     };
 
     #[traced_test]
     #[test]
     fn store_valid_data() {
-        let kad = Kad::new(16161, false, true);
+        let kad = Kad::new(16161, false, true).unwrap();
         let entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
         assert!(block_on(kad.node.store.put(
             kad.as_single_peer(),
@@ -255,11 +264,11 @@ mod tests {
     #[test]
     fn store_invalid_data() {
         // bad signatures
-        let kad = Kad::new(16161, false, true);
+        let kad = Kad::new(16161, false, true).unwrap();
         let mut entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
         entry.0.signature = String::from("wlefplwefplwef");
         entry.1 = String::from("wefwefwef");
@@ -274,7 +283,7 @@ mod tests {
         let mut entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
         entry.0.timestamp += REPUBLISH_TIME + 1;
 

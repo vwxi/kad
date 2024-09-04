@@ -375,7 +375,7 @@ mod tests {
     use crate::{
         node::{Kad, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
-        store::Value,
+        store::{Data, Value},
         util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer},
     };
     use futures::executor::block_on;
@@ -386,7 +386,10 @@ mod tests {
     #[test]
     #[traced_test]
     fn key() {
-        let (first, second) = (Kad::new(16161, false, true), Kad::new(16162, false, true));
+        let (first, second) = (
+            Kad::new(16161, false, true).unwrap(),
+            Kad::new(16162, false, true).unwrap(),
+        );
 
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();
@@ -415,7 +418,10 @@ mod tests {
     #[traced_test]
     #[test]
     fn get_addresses() {
-        let (first, second) = (Kad::new(16163, false, true), Kad::new(16164, false, true));
+        let (first, second) = (
+            Kad::new(16163, false, true).unwrap(),
+            Kad::new(16164, false, true).unwrap(),
+        );
 
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();
@@ -458,7 +464,10 @@ mod tests {
     #[traced_test]
     #[test]
     fn store() {
-        let (first, second) = (Kad::new(16165, false, true), Kad::new(16166, false, true));
+        let (first, second) = (
+            Kad::new(16165, false, true).unwrap(),
+            Kad::new(16166, false, true).unwrap(),
+        );
 
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();
@@ -469,7 +478,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(&Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
         assert!(
             first
@@ -489,7 +498,10 @@ mod tests {
     #[traced_test]
     #[test]
     fn find_node() {
-        let (first, second) = (Kad::new(16167, false, true), Kad::new(16168, false, true));
+        let (first, second) = (
+            Kad::new(16167, false, true).unwrap(),
+            Kad::new(16168, false, true).unwrap(),
+        );
 
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();
@@ -530,7 +542,10 @@ mod tests {
     #[traced_test]
     #[test]
     fn find_value() {
-        let (first, second) = (Kad::new(16169, false, true), Kad::new(16170, false, true));
+        let (first, second) = (
+            Kad::new(16169, false, true).unwrap(),
+            Kad::new(16170, false, true).unwrap(),
+        );
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();
 
@@ -552,7 +567,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(&Value::Data(String::from("hello")));
+            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
 
         assert!(
             first
