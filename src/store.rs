@@ -1,9 +1,8 @@
 use crate::{
     node::InnerKad,
-    util::{timestamp, Hash, SinglePeer},
+    util::{timestamp, Data, Entry, Hash, ProviderRecord, SinglePeer, Value},
 };
 use futures::Future;
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Weak};
 use tokio::sync::RwLock;
 
@@ -19,32 +18,6 @@ pub(crate) mod consts {
         #[cfg(not(test))] {
             pub(crate) const REPUBLISH_TIME: u64 = 86400;
             pub(crate) const REPUBLISH_INTERVAL: usize = 86400;
-        }
-    }
-}
-
-crate::util::pred_block! {
-    #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)] {
-        pub struct ProviderRecord {
-            pub provider: Hash,
-            pub expiry: u64,
-        }
-
-        pub enum Data {
-            Raw(String),
-            Compressed(String)
-        }
-
-        pub enum Value {
-            Data(Data),
-            ProviderRecord(ProviderRecord),
-        }
-
-        pub struct Entry {
-            pub value: Value,
-            pub signature: String,
-            pub origin: SinglePeer,
-            pub timestamp: u64,
         }
     }
 }
@@ -251,7 +224,7 @@ mod tests {
         let entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
         assert!(block_on(kad.node.store.put(
             kad.as_single_peer(),
@@ -268,7 +241,7 @@ mod tests {
         let mut entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
         entry.0.signature = String::from("wlefplwefplwef");
         entry.1 = String::from("wefwefwef");
@@ -283,7 +256,7 @@ mod tests {
         let mut entry = kad
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
         entry.0.timestamp += REPUBLISH_TIME + 1;
 

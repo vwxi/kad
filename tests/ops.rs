@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use kad::{node::Kad, util::Peer};
+    use kad::{node::Kad, util::{Data, Peer, Value}};
     use std::{sync::Arc, time::Duration};
     use tracing_test::traced_test;
 
@@ -74,5 +74,37 @@ mod tests {
             .is_some());
 
         nodes.into_iter().for_each(Kad::stop);
+    }
+
+    #[test]
+    #[traced_test]
+    fn put_compressed() {
+        let (kad1, kad2) = (
+            Kad::new(16150, false, true).unwrap(),
+            Kad::new(16151, false, true).unwrap(),
+        );
+
+        kad1.clone().serve().unwrap();
+        kad2.clone().serve().unwrap();
+
+        let addr2 = kad2.clone().addr();
+
+        assert!(kad1.join(addr2));
+        assert!(kad1.put("hello", "good morning everyone have a nice day", true).unwrap().is_empty());
+
+        let res = kad1.get("hello", false);
+
+        assert!(!res.is_empty());
+
+        if let Value::Data(Data::Raw(r)) = &res.first().unwrap().value {
+            let v: Vec<u8> = "good morning everyone have a nice day".into();
+
+            assert!(r.iter().zip(v.iter()).all(|(x, y)| x == y));
+        } else {
+            panic!("incorrect format");
+        }
+
+        kad1.stop();
+        kad2.stop();
     }
 }

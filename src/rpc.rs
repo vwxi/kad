@@ -375,8 +375,7 @@ mod tests {
     use crate::{
         node::{Kad, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
-        store::{Data, Value},
-        util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer},
+        util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer, Data, Value},
     };
     use futures::executor::block_on;
     use rsa::pkcs1::EncodeRsaPublicKey;
@@ -478,7 +477,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
         assert!(
             first
@@ -567,7 +566,7 @@ mod tests {
         let entry = first
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
         assert!(
             first

@@ -441,8 +441,7 @@ impl InnerKad {
 mod tests {
     use crate::{
         node::{consts, Kad},
-        store::Value,
-        util::{hash, FindValueResult, Hash},
+        util::{hash, FindValueResult, Hash, Value},
     };
     use futures::executor::block_on;
     use std::sync::Arc;
@@ -510,7 +509,7 @@ mod tests {
     }
 
     mod lookup_value {
-        use crate::store::Data;
+        use crate::util::Data;
 
         use super::*;
 
@@ -542,7 +541,7 @@ mod tests {
                 let first_entry = nodes[0]
                     .node
                     .store
-                    .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+                    .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
                 let _ = nodes[0].node.clone().store(
                     nodes[1].as_peer(),
@@ -583,7 +582,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+                .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
             // allow there to be a time difference
             std::thread::sleep(tokio::time::Duration::from_secs(1));
@@ -648,7 +647,7 @@ mod tests {
             let first_entry = nodes[0]
                 .node
                 .store
-                .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+                .create_new_entry(&Value::Data(Data::Raw("hello".into())));
 
             assert!(block_on(nodes[1].node.store.put(
                 nodes[0].as_single_peer(),

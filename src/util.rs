@@ -157,40 +157,64 @@ pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub(crate) enum RpcOp {
-    Key,
-    Ping,
-    GetAddresses(Hash),
-    FindNode(Hash),
-    FindValue(Hash),
-    Store(Hash, Box<StoreEntry>),
-}
+crate::util::pred_block! {
+    #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)] {
+        pub struct ProviderRecord {
+            pub provider: Hash,
+            pub expiry: u64,
+        }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum FindValueResult {
-    None,
-    Value(Box<StoreEntry>),
-    Nodes(Vec<SinglePeer>),
-}
+        pub enum Data {
+            Raw(Vec<u8>),
+            Compressed(Vec<u8>)
+        }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum RpcResult {
-    Bad,
-    Key(String),
-    Ping(Hash),
-    Store,
-    GetAddresses(Option<Vec<Addr>>),
-    FindNode(Vec<SinglePeer>),
-    FindValue(Box<FindValueResult>),
-}
+        pub enum Value {
+            Data(Data),
+            ProviderRecord(ProviderRecord),
+        }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RpcContext {
-    pub(crate) id: Hash,
-    pub(crate) op: RpcOp,
-    pub(crate) addr: Addr,
-    pub(crate) timestamp: u64,
+        pub struct Entry {
+            pub value: Value,
+            pub signature: String,
+            pub origin: SinglePeer,
+            pub timestamp: u64,
+        }
+
+        pub(crate) enum RpcOp {
+            Key,
+            Ping,
+            GetAddresses(Hash),
+            FindNode(Hash),
+            FindValue(Hash),
+            Store(Hash, Box<StoreEntry>),
+        }
+
+        pub(crate) enum FindValueResult {
+            None,
+            Value(Box<StoreEntry>),
+            Nodes(Vec<SinglePeer>),
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)] {
+        pub(crate) enum RpcResult {
+            Bad,
+            Key(String),
+            Ping(Hash),
+            Store,
+            GetAddresses(Option<Vec<Addr>>),
+            FindNode(Vec<SinglePeer>),
+            FindValue(Box<FindValueResult>),
+        }
+
+        pub(crate) struct RpcContext {
+            pub(crate) id: Hash,
+            pub(crate) op: RpcOp,
+            pub(crate) addr: Addr,
+            pub(crate) timestamp: u64,
+        }
+    }
 }
 
 pub(crate) type RpcArgs = (RpcContext, String);

@@ -6,10 +6,10 @@ use crate::{
     crypto::Crypto,
     routing::{consts as routing_consts, RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
-    store::{consts as store_consts, Data, Entry, ProviderRecord, Store, StoreEntry, Value},
+    store::{consts as store_consts, Store, StoreEntry},
     util::{
         hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
-        SinglePeer,
+        SinglePeer, Data, Entry, ProviderRecord, Value
     },
     U256,
 };
@@ -217,7 +217,7 @@ impl Kad {
     }
 
     /// Ping a peer.
-    /// 
+    ///
     /// Returns the responding peer if successful, otherwise it returns a boxed `peer`
     pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         self.node.clone().ping(peer)
@@ -247,7 +247,7 @@ impl Kad {
     }
 
     /// Put a key-value pair on the network.
-    /// 
+    ///
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn put<'a, T: Serialize + Deserialize<'a>>(
         self: &Arc<Self>,
@@ -265,9 +265,9 @@ impl Kad {
                         let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
                         let _ = e.write_all(v.as_bytes());
 
-                        Data::Compressed(String::from_utf8(e.finish()?)?)
+                        Data::Compressed(e.finish()?)
                     } else {
-                        Data::Raw(v)
+                        Data::Raw(v.into())
                     }),
                 ))),
             Err(e) => Err(Box::new(e)),
@@ -275,7 +275,7 @@ impl Kad {
     }
 
     /// Put a provider record on the network
-    /// 
+    ///
     /// Provider records will remain valid on the network for `REPUBLISH_TIME` seconds.  
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
@@ -291,8 +291,9 @@ impl Kad {
     }
 
     /// Get a key-value pair from the network.
-    /// 
-    /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.
+    ///
+    /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.  
+    /// ***NOTE:*** If the routing table contains less than `DISJOINT_PATHS` nodes during a disjoint lookup, then no values will return.
     ///
     /// Returns a list of retrieved valid values.
     pub fn get(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<Entry> {
@@ -323,13 +324,13 @@ impl Kad {
 
                     match entry.value {
                         Value::Data(Data::Compressed(c)) => {
-                            let mut d = ZlibDecoder::new(c.as_bytes());
+                            let mut d = ZlibDecoder::new(&c[..]);
                             let mut s = String::new();
 
                             if d.read_to_string(&mut s).is_err() {
                                 None
                             } else {
-                                entry.value = Value::Data(Data::Raw(s));
+                                entry.value = Value::Data(Data::Raw(s.into()));
                                 Some(entry)
                             }
                         }
@@ -343,9 +344,9 @@ impl Kad {
     }
 
     /// Get providers for a key on the network.
-    /// 
+    ///
     /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.
-    /// 
+    ///
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
         let result = self.get(key, disjoint);
@@ -360,7 +361,7 @@ impl Kad {
     }
 
     /// Join the network from an address.
-    /// 
+    ///
     /// Returns true if the join procedure was successful.
     pub fn join(self: &Arc<Self>, addr: Addr) -> bool {
         self.runtime.handle().block_on(self.node.clone().join(addr))
@@ -837,8 +838,8 @@ mod tests {
 
         assert!(block_on(nodes[0].node.clone().iter_store_new(
             hash("good morning"),
-            Value::Data(Data::Raw(String::from("hello")))
-        ),)
+            Value::Data(Data::Raw("hello".into()))
+        ))
         .is_empty()); // none of them should fail
 
         // check if every node got the value
@@ -857,7 +858,7 @@ mod tests {
         let entry = nodes[0]
             .node
             .store
-            .create_new_entry(&Value::Data(Data::Raw(String::from("hello"))));
+            .create_new_entry(&Value::Data(Data::Raw("hello".into())));
         assert!(block_on(nodes[0].clone().node.store.put(
             nodes[0].as_single_peer(),
             hash("good morning"),
