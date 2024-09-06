@@ -76,7 +76,7 @@ impl Bucket {
     fn add_peer(&mut self, peer: SinglePeer) {
         debug!("added peer {:#x}", peer.id);
 
-        self.peers.push(peer.as_peer());
+        self.peers.push(peer.peer());
         self.last_seen = timestamp();
     }
 
@@ -123,7 +123,7 @@ impl Bucket {
             entry.addresses.sort_by(|x, y| x.1.cmp(&y.1));
         } else if self.peers.len() < consts::BUCKET_SIZE {
             // does not exist in bucket, add
-            self.peers.push(peer.as_peer());
+            self.peers.push(peer.peer());
         }
 
         self.last_seen = timestamp();
@@ -253,7 +253,12 @@ impl RoutingTable {
             let lock = trie.read().await;
 
             if let Some(bucket) = &lock.bucket {
-                bucket.peers.clone().iter().map(Peer::single_peer).collect()
+                bucket
+                    .peers
+                    .clone()
+                    .iter()
+                    .filter_map(|x| x.single_peer().ok())
+                    .collect()
             } else {
                 vec![]
             }

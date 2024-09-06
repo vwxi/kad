@@ -8,14 +8,14 @@ use crate::{
     rpc::{KadNetwork, Network},
     store::{consts as store_consts, Store, StoreEntry},
     util::{
-        hash, timestamp, Addr, FindValueResult, Hash, Peer, RpcOp, RpcResult, RpcResults,
-        SinglePeer, Data, Entry, ProviderRecord, Value
+        hash, timestamp, Addr, Data, FindValueResult, Hash, Kv, Peer, ProviderRecord, RpcOp,
+        RpcResult, RpcResults, SinglePeer, Value,
     },
     U256,
 };
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use std::error::Error;
 use std::sync::{Arc, Weak};
 use std::{
@@ -55,6 +55,24 @@ pub struct Kad {
 
 impl Kad {
     /// Create a new Kad object.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - port to bind to (0-65535)
+    /// * `ipv6` - bind to ipv6 flag
+    /// * `local` - bind to localhost flag
+    ///
+    /// # Errors
+    ///
+    /// Will return a `std::thread::Result` if the runtime could not be created or if there was an error initializing the inner object.
+    ///
+    /// # Results
+    ///
+    /// Returns Arc to Kad object if successful.
+    ///
+    /// # Panics
+    ///
+    /// All panics should be caught and returned as an `Err`
     pub fn new(port: u16, ipv6: bool, local: bool) -> std::thread::Result<Arc<Self>> {
         std::panic::catch_unwind(|| {
             Arc::new_cyclic(|gadget| {
@@ -159,7 +177,11 @@ impl Kad {
         Ok(new)
     }
 
-    /// Start threads to receive messages
+    /// Start threads to receive messages.
+    ///
+    /// # Errors
+    ///
+    /// May return an `Err` if the serving thread was not successfully created.
     pub fn serve(self: Arc<Self>) -> std::io::Result<()> {
         let rt = self.runtime.handle();
 
@@ -197,7 +219,7 @@ impl Kad {
         Ok(())
     }
 
-    /// Stop any running threads and destroy Kad object
+    /// Stop any running threads and consumes Kad object
     pub fn stop(self: Arc<Self>) {
         if let Ok(r) = Arc::try_unwrap(self) {
             {
@@ -218,7 +240,17 @@ impl Kad {
 
     /// Ping a peer.
     ///
-    /// Returns the responding peer if successful, otherwise it returns a boxed `peer`
+    /// # Arguments
+    ///
+    /// * `peer` - pinged peer
+    ///
+    /// # Errors
+    ///
+    /// Returns the unresponsive peer if unsuccessful.
+    ///
+    /// # Return value
+    ///
+    /// Returns the responding peer if successful.
     pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         self.node.clone().ping(peer)
     }
@@ -243,18 +275,42 @@ impl Kad {
 
     /// Returns the node ID and resolved addresses in a `Peer` object
     pub fn as_peer(self: &Arc<Self>) -> Peer {
-        self.as_single_peer().as_peer()
+        self.as_single_peer().peer()
     }
 
     /// Put a key-value pair on the network.
     ///
-    /// Returns a list of all peers contacted that did not store the value if successful.
-    pub fn put<'a, T: Serialize + Deserialize<'a>>(
+    /// # Example
+    ///
+    /// ```
+    /// use kad::{node::Kad, util::Kvs};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// assert!(!node.put("hello", String::from("good morning"), false).unwrap().is_empty());
+    ///
+    /// node.stop();
+    /// ```
+    ///  
+    /// # Arguments
+    ///
+    /// * `key` - Key to store
+    /// * `value` - Value to store
+    /// * `compress` - Apply compression flag
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the sends fail.
+    pub fn put<T: Serialize + DeserializeOwned>(
         self: &Arc<Self>,
         key: &str,
-        value: T,
+        value: &T,
         compress: bool,
     ) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
+        // compress and serialize
         match serde_json::to_string(&value) {
             Ok(v) => Ok(self
                 .runtime
@@ -262,7 +318,7 @@ impl Kad {
                 .block_on(self.node.clone().iter_store_new(
                     hash(key),
                     Value::Data(if compress {
-                        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+                        let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
                         let _ = e.write_all(v.as_bytes());
 
                         Data::Compressed(e.finish()?)
@@ -276,8 +332,36 @@ impl Kad {
 
     /// Put a provider record on the network
     ///
+    /// # Example
+    ///
+    /// ```
+    /// use kad::{node::Kad, util::Kvs};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// node.provide("thing").unwrap();
+    ///
+    /// node.stop();
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - key to provide
+    ///
+    /// # Behavior
+    ///
     /// Provider records will remain valid on the network for `REPUBLISH_TIME` seconds.  
+    ///
+    /// # Return value
+    ///
     /// Returns a list of all peers contacted that did not store the value if successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns any errors during the process.
     pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
         let record = self
             .node
@@ -287,20 +371,14 @@ impl Kad {
                 expiry: timestamp() + store_consts::REPUBLISH_TIME,
             }));
 
-        self.put(key, record, false)
+        self.put(key, &record, false)
     }
 
-    /// Get a key-value pair from the network.
-    ///
-    /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.  
-    /// ***NOTE:*** If the routing table contains less than `DISJOINT_PATHS` nodes during a disjoint lookup, then no values will return.
-    ///
-    /// Returns a list of retrieved valid values.
-    pub fn get(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<Entry> {
+    fn lookup(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<FindValueResult> {
         let h = hash(key);
         let rt = self.runtime.handle();
 
-        let results: Vec<FindValueResult> = if disjoint {
+        if disjoint {
             rt.block_on(self.node.clone().disjoint_lookup_value(
                 h,
                 consts::DISJOINT_PATHS,
@@ -314,28 +392,84 @@ impl Kad {
                     .clone()
                     .lookup_value(peers, None, h, consts::QUORUM),
             )]
-        };
+        }
+    }
+
+    /// Get values from the network.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kad::{node::Kad, util::Kvs};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// let values: Kvs<String> = node.get("hello", false);
+    ///
+    /// node.stop();
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - search key
+    /// * `disjoint` - use disjoint lookups
+    ///
+    /// # Behavior
+    ///
+    /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.  
+    /// ***NOTE:*** If the routing table contains less than `DISJOINT_PATHS` nodes during a disjoint lookup, then no values will return.
+    ///
+    /// All values of a different type than `T` will be rejected.  
+    ///
+    /// # Return value
+    ///
+    /// Returns a list of retrieved valid values.
+    pub fn get<T: Serialize + DeserializeOwned>(
+        self: &Arc<Self>,
+        key: &str,
+        disjoint: bool,
+    ) -> Vec<Kv<T>> {
+        let results = self.lookup(key, disjoint);
 
         results
             .iter()
             .filter_map(|r| match r {
                 FindValueResult::Value(val) => {
-                    let mut entry = (**val).0.clone();
-
+                    let entry = (**val).0.clone();
                     match entry.value {
+                        // decompress and deserialize
                         Value::Data(Data::Compressed(c)) => {
                             let mut d = ZlibDecoder::new(&c[..]);
                             let mut s = String::new();
 
                             if d.read_to_string(&mut s).is_err() {
                                 None
+                            } else if let Ok(v) = serde_json::from_str(s.as_str()) {
+                                Some(Kv {
+                                    value: v,
+                                    origin: entry.origin,
+                                    timestamp: entry.timestamp,
+                                })
                             } else {
-                                entry.value = Value::Data(Data::Raw(s.into()));
-                                Some(entry)
+                                debug!("unknown value type from lookup");
+                                None
                             }
                         }
-                        Value::Data(Data::Raw(_)) => Some(entry),
-                        _ => Some(entry),
+                        Value::Data(Data::Raw(r)) => {
+                            if let Ok(v) = serde_json::from_slice(r.as_slice()) {
+                                Some(Kv {
+                                    value: v,
+                                    origin: entry.origin,
+                                    timestamp: entry.timestamp,
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Value::ProviderRecord(_) => None,
                     }
                 }
                 _ => None,
@@ -349,12 +483,18 @@ impl Kad {
     ///
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
-        let result = self.get(key, disjoint);
+        let results = self.lookup(key, disjoint);
 
-        result
-            .iter()
-            .filter_map(|r| match &r.value {
-                Value::ProviderRecord(record) => Some(record.clone()),
+        results
+            .into_iter()
+            .filter_map(|x| match x {
+                FindValueResult::Value(val) => {
+                    let entry = val.0.clone();
+                    match entry.value {
+                        Value::ProviderRecord(pr) => Some(pr),
+                        _ => None,
+                    }
+                }
                 _ => None,
             })
             .collect()
@@ -478,6 +618,10 @@ impl InnerKad {
             },
             port,
         );
+
+        if !local {
+            todo!();
+        }
 
         Arc::new_cyclic(|gadget| {
             let c = Crypto::new(gadget.clone()).expect("could not initialize crypto");
@@ -836,10 +980,12 @@ mod tests {
     fn iter_store() {
         let nodes = setup(18010);
 
-        assert!(block_on(nodes[0].node.clone().iter_store_new(
-            hash("good morning"),
-            Value::Data(Data::Raw("hello".into()))
-        ))
+        assert!(block_on(
+            nodes[0]
+                .node
+                .clone()
+                .iter_store_new(hash("good morning"), Value::Data(Data::Raw("hello".into())))
+        )
         .is_empty()); // none of them should fail
 
         // check if every node got the value

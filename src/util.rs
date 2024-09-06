@@ -1,5 +1,10 @@
+//! Utility functions
+//!
+//! Structures, type aliases and helper functions
+
 use core::fmt;
 use std::{
+    error::Error,
     net::{IpAddr, Ipv4Addr},
     num::ParseIntError,
     time::{SystemTime, UNIX_EPOCH},
@@ -12,6 +17,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Addr(pub IpAddr, pub u16);
 pub type Hash = crate::U256;
+pub type Kvs<T> = Vec<Kv<T>>;
 
 macro_rules! pred_block {
     ($( #[$meta:meta] {$($item:item)*} )*) => {
@@ -73,20 +79,29 @@ impl Peer {
         }
     }
 
-    pub fn single_peer(&self) -> SinglePeer {
+    /// Return single peer from peer
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if there are no addresses in the address list.
+    pub fn single_peer(&self) -> Result<SinglePeer, Box<dyn Error>> {
         let nothing: Addr = Addr(IpAddr::from(Ipv4Addr::UNSPECIFIED), 0);
 
-        SinglePeer {
+        Ok(SinglePeer {
             id: self.id,
             addr: if self.addresses.is_empty() {
                 nothing
             } else {
-                self.addresses
+                match self
+                    .addresses
                     .first()
-                    .expect("could not find any addresses to use in SinglePeer")
-                    .0
+                    .ok_or(Err("cannot convert empty peer"))
+                {
+                    Ok(a) => a.0,
+                    Err(e) => e?,
+                }
             },
-        }
+        })
     }
 }
 
@@ -107,7 +122,7 @@ impl SinglePeer {
     }
 
     #[must_use]
-    pub fn as_peer(&self) -> Peer {
+    pub fn peer(&self) -> Peer {
         Peer {
             id: self.id,
             addresses: vec![(self.addr, 0)],
@@ -122,13 +137,11 @@ impl Distribution<Hash> for Standard {
     }
 }
 
+/// Hashes a string slice.
+#[must_use]
 pub fn hash(s: &str) -> Hash {
     let mut hasher = Sha256::new();
-    hasher.update(
-        serde_json::to_string(s)
-            .expect("serialization for hashing failed")
-            .as_bytes(),
-    );
+    hasher.update(s.as_bytes());
 
     Hash::from_little_endian(hasher.finalize().as_mut_slice())
 }
@@ -174,7 +187,13 @@ crate::util::pred_block! {
             ProviderRecord(ProviderRecord),
         }
 
-        pub struct Entry {
+        pub struct Kv<T> {
+            pub value: T,
+            pub origin: SinglePeer,
+            pub timestamp: u64
+        }
+
+        pub(crate) struct Entry {
             pub value: Value,
             pub signature: String,
             pub origin: SinglePeer,

@@ -70,7 +70,7 @@ impl InnerKad {
                                         continue;
                                     }
 
-                                    shortlist.push_back(peer.as_peer());
+                                    shortlist.push_back(peer.peer());
                                 }
                             }
                         });
@@ -177,7 +177,7 @@ impl InnerKad {
             nodes
                 .iter()
                 .filter(|x| !pq.contains(&x.id) && x.id != self.table.id)
-                .map(|x| handle.block_on(self.table.clone().resolve(x.as_peer()))),
+                .map(|x| handle.block_on(self.table.clone().resolve(x.peer()))),
         );
     }
 
@@ -313,7 +313,7 @@ impl InnerKad {
 
                         tokio::task::block_in_place(|| {
                             let _ = self.clone().store(
-                                handle.block_on(self.table.clone().resolve(p.as_peer())),
+                                handle.block_on(self.table.clone().resolve(p.peer())),
                                 key,
                                 self.store.forward_entry(*v.clone()),
                             );

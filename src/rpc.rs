@@ -375,7 +375,7 @@ mod tests {
     use crate::{
         node::{Kad, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
-        util::{generate_peer, hash, Addr, FindValueResult, Hash, Peer, SinglePeer, Data, Value},
+        util::{generate_peer, hash, Addr, Data, FindValueResult, Hash, Peer, SinglePeer, Value},
     };
     use futures::executor::block_on;
     use rsa::pkcs1::EncodeRsaPublicKey;

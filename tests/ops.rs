@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use kad::{node::Kad, util::{Data, Peer, Value}};
+    use kad::{
+        node::Kad,
+        util::{Kvs, Peer},
+    };
     use std::{sync::Arc, time::Duration};
     use tracing_test::traced_test;
 
@@ -8,6 +11,7 @@ mod tests {
     #[traced_test]
     fn serve() {
         let kad = Kad::new(16152, false, true).unwrap();
+        kad.clone().serve().unwrap();
 
         std::thread::sleep(Duration::from_secs(1));
 
@@ -21,6 +25,9 @@ mod tests {
             Kad::new(16150, false, true).unwrap(),
             Kad::new(16151, false, true).unwrap(),
         );
+
+        kad1.clone().serve().unwrap();
+        kad2.clone().serve().unwrap();
 
         let addr1 = kad1.clone().addr();
         let peer1 = Peer::new(kad1.clone().id(), addr1);
@@ -58,18 +65,26 @@ mod tests {
             assert!(i.join(nodes[0].addr()));
         }
 
-        let res = nodes[0].put("good morning", "hello", false).unwrap();
+        let res = nodes[0]
+            .put("good morning", &String::from("hello"), false)
+            .unwrap();
 
         // make sure all recipients accepted value
         assert!(res.is_empty());
 
-        let res = nodes[3].get("good morning", true);
+        let res: Kvs<String> = nodes[3].get("good morning", true);
 
         assert!(!res.is_empty());
         assert!(res
             .iter()
             .fold(res.first(), |acc, item| {
-                acc.and_then(|s| if s == item { Some(s) } else { None })
+                acc.and_then(|s| {
+                    if s == item && item.value == String::from("hello") {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
             })
             .is_some());
 
@@ -80,8 +95,8 @@ mod tests {
     #[traced_test]
     fn put_compressed() {
         let (kad1, kad2) = (
-            Kad::new(16150, false, true).unwrap(),
-            Kad::new(16151, false, true).unwrap(),
+            Kad::new(16153, false, true).unwrap(),
+            Kad::new(16154, false, true).unwrap(),
         );
 
         kad1.clone().serve().unwrap();
@@ -90,19 +105,22 @@ mod tests {
         let addr2 = kad2.clone().addr();
 
         assert!(kad1.join(addr2));
-        assert!(kad1.put("hello", "good morning everyone have a nice day", true).unwrap().is_empty());
+        assert!(kad1
+            .put(
+                "hello",
+                &String::from("good morning everyone have a nice day"),
+                true
+            )
+            .unwrap()
+            .is_empty());
 
-        let res = kad1.get("hello", false);
+        let res: Kvs<String> = kad1.get("hello", false);
 
         assert!(!res.is_empty());
 
-        if let Value::Data(Data::Raw(r)) = &res.first().unwrap().value {
-            let v: Vec<u8> = "good morning everyone have a nice day".into();
+        let v = String::from("good morning everyone have a nice day");
 
-            assert!(r.iter().zip(v.iter()).all(|(x, y)| x == y));
-        } else {
-            panic!("incorrect format");
-        }
+        assert_eq!(v, res.first().unwrap().value);
 
         kad1.stop();
         kad2.stop();
