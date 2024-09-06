@@ -90,6 +90,58 @@ impl Kad {
         })
     }
 
+    /// Create a new Kad object, importing keys from files.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - port to bind to (0-65535)
+    /// * `ipv6` - bind to ipv6 flag
+    /// * `local` - bind to localhost flag
+    /// * `priv_key` - path to private key file
+    /// * `pub_key` - path to private key file
+    ///
+    /// # Errors
+    ///
+    /// Will return a `std::thread::Result` if the runtime could not be created or if there was an error initializing the inner object.
+    ///
+    /// # Results
+    ///
+    /// Returns Arc to Kad object if successful.
+    ///
+    /// # Panics
+    ///
+    /// All panics should be caught and returned as an `Err`
+    pub fn new_from_file(port: u16, ipv6: bool, local: bool, priv_key: &str, pub_key: &str) -> std::thread::Result<Arc<Self>> {
+        std::panic::catch_unwind(|| {
+            Arc::new_cyclic(|gadget| {
+                let n = InnerKad::new_from_file(port, ipv6, local, gadget.clone(), priv_key, pub_key);
+                let rt = Runtime::new().expect("could not create Kad runtime object");
+
+                Kad {
+                    kad_handle: Mutex::new(None),
+                    refresh_handle: Mutex::new(None),
+                    republish_handle: Mutex::new(None),
+                    node: n.clone(),
+                    runtime: rt,
+                }
+            })
+        })
+    }
+
+    /// Export keys to file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priv_key` - path to private key file
+    /// * `pub_key` - path to public key file
+    /// 
+    /// # Return value
+    /// 
+    /// Returns true if successful, false otherwise.
+    pub fn to_file(self: &Arc<Self>, priv_key: &str, pub_key: &str) -> bool {
+        self.node.crypto.to_file(priv_key, pub_key).is_ok()
+    }
+
     #[cfg(test)]
     pub(crate) fn mock(
         port: u16,
@@ -479,8 +531,32 @@ impl Kad {
 
     /// Get providers for a key on the network.
     ///
+    /// # Example
+    /// 
+    /// ```
+    /// use kad::{node::Kad, util::Kvs};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// let values: Vec<ProviderRecord> = node.get_providers("hello", false);
+    ///
+    /// node.stop();
+    /// ```
+    /// 
+    /// # Arguments
+    /// 
+    /// * `key` - provider key string
+    /// * `disjoint` - disjoint lookup flag
+    /// 
+    /// # Behavior
+    /// 
     /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.
     ///
+    /// # Return value
+    /// 
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
         let results = self.lookup(key, disjoint);
@@ -501,7 +577,22 @@ impl Kad {
     }
 
     /// Join the network from an address.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use kad::{node::Kad, util::Kvs};
     ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// assert!(node.join(Addr(IpAddr::from("127.0.0.1"), 12345)));
+    ///
+    /// node.stop();
+    /// ```
+    /// 
+    /// # Return value
+    /// 
     /// Returns true if the join procedure was successful.
     pub fn join(self: &Arc<Self>, addr: Addr) -> bool {
         self.runtime.handle().block_on(self.node.clone().join(addr))
@@ -625,6 +716,52 @@ impl InnerKad {
 
         Arc::new_cyclic(|gadget| {
             let c = Crypto::new(gadget.clone()).expect("could not initialize crypto");
+            let id = hash(
+                c.public_key_as_string()
+                    .expect("could not acquire public key for ID hash")
+                    .as_str(),
+            );
+
+            let kn = InnerKad {
+                addr: Addr(a.0, a.1),
+                table: RoutingTable::new(id, gadget.clone()),
+                store: Store::new(gadget.clone()),
+                crypto: c,
+                parent: k,
+            };
+
+            // add own key
+            block_on(
+                kn.crypto.entry(
+                    id,
+                    kn.crypto
+                        .public_key_as_string()
+                        .expect("could not acquire public key for keyring")
+                        .as_str(),
+                ),
+            );
+
+            kn
+        })
+    }
+
+    pub(crate) fn new_from_file(port: u16, ipv6: bool, local: bool, k: Weak<Kad>, priv_key: &str, pub_key: &str) -> Arc<InnerKad> {
+        let a = (
+            match (local, ipv6) {
+                (true, true) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                (true, false) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                (false, true) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                (false, false) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            },
+            port,
+        );
+
+        if !local {
+            todo!();
+        }
+
+        Arc::new_cyclic(|gadget| {
+            let c = Crypto::from_file(gadget.clone(), priv_key, pub_key).expect("could not initialize crypto");
             let id = hash(
                 c.public_key_as_string()
                     .expect("could not acquire public key for ID hash")
