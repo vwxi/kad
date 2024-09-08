@@ -163,6 +163,21 @@ impl Crypto {
         }
     }
 
+    // get key from keystore
+    pub(crate) async fn get(&self, id: Hash) -> Option<String> {
+        let keyring = self.keyring.read().await;
+
+        if let Some(k) = keyring.get(&id) {
+            if let Ok(s) = k.0.to_pkcs1_pem(pkcs1::LineEnding::LF) {
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     // remove from keyring
     pub(crate) async fn remove(&self, id: &Hash) {
         let mut keyring = self.keyring.write().await;

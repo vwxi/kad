@@ -585,6 +585,10 @@ impl Kad {
 
     /// Join the network from an address.
     ///
+    /// # Arguments
+    /// 
+    /// * `addr` - Address to join from
+    /// 
     /// # Example
     ///
     /// ```
@@ -603,6 +607,36 @@ impl Kad {
     /// Returns true if the join procedure was successful.
     pub fn join(self: &Arc<Self>, addr: Addr) -> bool {
         self.runtime.handle().block_on(self.node.clone().join(addr))
+    }
+
+    /// Resolve an ID into a peer
+    /// 
+    /// # Arguments
+    /// 
+    /// * `id` - ID to resolve
+    /// 
+    /// # Return value
+    /// 
+    /// If peer doesn't exist in routing table, returns a list of all addresses that respond with a valid key and ID.  
+    /// Otherwise, returns addresses from routing table.
+    pub fn resolve(self: &Arc<Self>, id: Hash) -> Vec<Addr> {
+        let rt = self.runtime.handle();
+
+        if let Some(n) = rt.block_on(self.node.table.clone().find(id)) {
+            return n.addresses
+                .iter()
+                .map(|x| x.0)
+                .collect();
+        }
+
+        let addresses = rt.block_on(self.node.clone().resolve(id));
+
+        // remove all addresses whose keys don't resolve to desired ID
+        addresses
+            .iter()
+            .filter_map(|a| Some(dbg!(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok()))?)
+            .map(|x| x.addr)
+            .collect()
     }
 }
 
@@ -997,7 +1031,7 @@ impl InnerKad {
         let mut addresses: Vec<Addr> = vec![];
 
         for peer in self.clone().iter_find_node(key).await {
-            if let Ok((addrs, _)) = self.clone().get_addresses(peer, key) {
+            if let Ok((addrs, _)) = tokio::task::block_in_place(|| self.clone().get_addresses(peer, key)) {
                 addresses.extend(addrs.iter());
             }
         }

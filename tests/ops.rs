@@ -125,4 +125,24 @@ mod tests {
         kad1.stop();
         kad2.stop();
     }
+
+    #[traced_test]
+    #[test]
+    fn resolve() {
+        let nodes: Vec<Arc<Kad>> = (0..4)
+            .map(|i| Kad::new(16010 + i, false, true).unwrap())
+            .collect();
+        nodes.iter().for_each(|x| x.clone().serve().unwrap());
+
+        assert!(nodes[0].join(nodes[1].addr()));
+        assert!(nodes[1].join(nodes[2].addr()));
+        assert!(nodes[0].join(nodes[3].addr()));
+
+        let res = nodes[1].resolve(nodes[3].id());
+
+        assert!(!res.is_empty());
+        assert!(*res.first().unwrap() == nodes[2].addr());
+
+        nodes.into_iter().for_each(Kad::stop);
+    }
 }
