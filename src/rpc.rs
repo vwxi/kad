@@ -8,7 +8,7 @@ use futures::{
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 use tarpc::{
     client, context,
     server::{BaseChannel, Channel},
@@ -36,7 +36,6 @@ pub(crate) trait RpcService {
 pub(crate) struct Service {
     pub(crate) client: RpcServiceClient,
     pub(crate) node: Arc<InnerKad>,
-    pub(crate) addr: SocketAddr,
 }
 
 // hacky
@@ -82,7 +81,7 @@ impl Service {
             .node
             .crypto
             .verify_args(args, || async {
-                if let Ok((RpcResult::Key(key), _)) = self.client.key(context::current()).await {
+                if let Ok((RpcResult::Key(key), _, _)) = self.client.key(context::current()).await {
                     self.node.crypto.entry(args.0.id, key.as_str()).await;
                 }
             })
@@ -90,27 +89,31 @@ impl Service {
         {
             Ok(())
         } else {
-            Err(self.node.crypto.results(RpcResult::Bad))
+            Err(self
+                .node
+                .crypto
+                .results(self.node.create_ctx(), RpcResult::Bad))
         }
     }
 }
 
 impl RpcService for Service {
     async fn key(self, _: context::Context) -> RpcResults {
-        self.node
-            .crypto
-            .results(if let Ok(k) = self.node.crypto.public_key_as_string() {
+        self.node.crypto.results(
+            self.node.create_ctx(),
+            if let Ok(k) = self.node.crypto.public_key_as_string() {
                 RpcResult::Key(k)
             } else {
                 RpcResult::Bad
-            })
+            },
+        )
     }
 
     // pings are not identification. we're just seeing if we speak the same language
     async fn ping(self, _: context::Context) -> RpcResults {
         self.node
             .crypto
-            .results(RpcResult::Ping(self.node.table.id))
+            .results(self.node.create_ctx(), RpcResult::Ping)
     }
 
     // get_addresses will NOT verify any args and will NOT return any signature
@@ -127,6 +130,7 @@ impl RpcService for Service {
             } else {
                 RpcResult::Bad
             },
+            self.node.create_ctx(),
             String::new(),
         )
     }
@@ -141,15 +145,18 @@ impl RpcService for Service {
         if let RpcOp::Store(k, v) = args.0.op {
             self.node.table.clone().update::<RealPinger>(sender).await;
 
-            self.node
-                .crypto
-                .results(if self.node.store.put(sender, k, *v).await {
+            self.node.crypto.results(
+                self.node.create_ctx(),
+                if self.node.store.put(sender, k, *v).await {
                     RpcResult::Store
                 } else {
                     RpcResult::Bad
-                })
+                },
+            )
         } else {
-            self.node.crypto.results(RpcResult::Bad)
+            self.node
+                .crypto
+                .results(self.node.create_ctx(), RpcResult::Bad)
         }
     }
 
@@ -160,15 +167,18 @@ impl RpcService for Service {
 
         let sender = SinglePeer::new(args.0.id, args.0.addr);
 
-        if let RpcOp::FindNode(id) = args.0.op {
-            let bkt = self.node.table.clone().find_bucket(id).await;
+        self.node.crypto.results(
+            self.node.create_ctx(),
+            if let RpcOp::FindNode(id) = args.0.op {
+                let bkt = self.node.table.clone().find_bucket(id).await;
 
-            self.node.table.clone().update::<RealPinger>(sender).await;
+                self.node.table.clone().update::<RealPinger>(sender).await;
 
-            self.node.crypto.results(RpcResult::FindNode(bkt))
-        } else {
-            self.node.crypto.results(RpcResult::Bad)
-        }
+                RpcResult::FindNode(bkt)
+            } else {
+                RpcResult::Bad
+            },
+        )
     }
 
     async fn find_value(self, _: context::Context, args: RpcArgs) -> RpcResults {
@@ -182,19 +192,21 @@ impl RpcService for Service {
             self.node.table.clone().update::<RealPinger>(sender).await;
 
             if let Some(e) = self.node.store.get(&id).await {
-                self.node
-                    .crypto
-                    .results(RpcResult::FindValue(Box::new(FindValueResult::Value(
-                        Box::new(e),
-                    ))))
+                self.node.crypto.results(
+                    self.node.create_ctx(),
+                    RpcResult::FindValue(Box::new(FindValueResult::Value(Box::new(e)))),
+                )
             } else {
                 let bkt = self.node.table.clone().find_bucket(id).await;
-                self.node
-                    .crypto
-                    .results(RpcResult::FindValue(Box::new(FindValueResult::Nodes(bkt))))
+                self.node.crypto.results(
+                    self.node.create_ctx(),
+                    RpcResult::FindValue(Box::new(FindValueResult::Nodes(bkt))),
+                )
             }
         } else {
-            self.node.crypto.results(RpcResult::Bad)
+            self.node
+                .crypto
+                .results(self.node.create_ctx(), RpcResult::Bad)
         }
     }
 }
@@ -277,13 +289,11 @@ pub(crate) trait Network {
                     listener
                         .filter_map(|r| future::ready(r.ok()))
                         .map(|i| {
-                            let peer_addr = i.peer_addr().unwrap();
                             let (srv, clt) = Self::spawn_twoway(i);
                             let service = Service {
                                 client: RpcServiceClient::new(client::Config::default(), clt)
                                     .spawn(),
                                 node: node_.clone(),
-                                addr: peer_addr,
                             };
 
                             BaseChannel::with_defaults(srv)
@@ -307,12 +317,10 @@ pub(crate) trait Network {
         transport.config_mut().max_frame_length(usize::MAX);
 
         let i = transport.await?;
-        let peer_addr = i.peer_addr().unwrap();
         let (srv, clt) = Self::spawn_twoway(i);
         let service = Service {
             client: RpcServiceClient::new(client::Config::default(), clt).spawn(),
             node: kad.node.clone(),
-            addr: peer_addr,
         };
 
         tokio::spawn(

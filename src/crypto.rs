@@ -120,14 +120,14 @@ impl Crypto {
         (ctx, sign)
     }
 
-    pub(crate) fn results(&self, res: RpcResult) -> RpcResults {
+    pub(crate) fn results(&self, ctx: RpcContext, res: RpcResult) -> RpcResults {
         let sign = self.sign(
             serde_json::to_string(&res)
                 .expect("results serialization failed")
                 .as_str(),
         );
 
-        (res, sign)
+        (res, ctx, sign)
     }
 
     // add/update key to keyring
@@ -160,21 +160,6 @@ impl Crypto {
             true
         } else {
             false
-        }
-    }
-
-    // get key from keystore
-    pub(crate) async fn get(&self, id: Hash) -> Option<String> {
-        let keyring = self.keyring.read().await;
-
-        if let Some(k) = keyring.get(&id) {
-            if let Ok(s) = k.0.to_pkcs1_pem(pkcs1::LineEnding::LF) {
-                Some(s)
-            } else {
-                None
-            }
-        } else {
-            None
         }
     }
 
@@ -242,20 +227,20 @@ impl Crypto {
         }
     }
 
-    pub(crate) async fn verify_results(&self, id: &Hash, results: &RpcResults) -> bool {
+    pub(crate) async fn verify_results(&self, results: &RpcResults) -> bool {
         let keyring = self.keyring.read().await;
 
-        if keyring.contains_key(id) {
+        if keyring.contains_key(&results.1.id) {
             self.verify(
-                id,
+                &results.1.id,
                 serde_json::to_string(&results.0)
                     .as_ref()
                     .expect("results serialization failed"),
-                &results.1,
+                &results.2,
             )
             .await
         } else {
-            self.remove(id).await;
+            self.remove(&results.1.id).await;
             false
         }
     }

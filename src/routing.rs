@@ -15,7 +15,6 @@ pub(crate) mod consts {
     pub(crate) const HASH_SIZE: usize = 256;
     pub(crate) const ADDRESS_LIMIT: usize = 5;
     pub(crate) const MISSED_PINGS_ALLOWED: usize = 3;
-    pub(crate) const MISSED_MESSAGES_ALLOWED: usize = 3;
     pub(crate) const CACHE_SIZE: usize = 3;
     pub(crate) const ALPHA: usize = 3;
 
@@ -316,7 +315,7 @@ impl RoutingTable {
                     .unwrap()
                     .addresses
                     .iter()
-                    .position(|x| dbg!(x.0) == dbg!(peer.addr))
+                    .position(|x| x.0 == peer.addr)
                 {
                     let addr_entry = bkt
                         .peers

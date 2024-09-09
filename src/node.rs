@@ -8,8 +8,8 @@ use crate::{
     rpc::{KadNetwork, Network},
     store::{consts as store_consts, Store, StoreEntry},
     util::{
-        hash, timestamp, Addr, Data, FindValueResult, Hash, Kv, Peer, ProviderRecord, RpcOp,
-        RpcResult, RpcResults, SinglePeer, Value,
+        hash, timestamp, Addr, Data, FindValueResult, Hash, Kv, Peer, ProviderRecord, RpcContext,
+        RpcOp, RpcResult, RpcResults, SinglePeer, Value,
     },
     U256,
 };
@@ -586,9 +586,9 @@ impl Kad {
     /// Join the network from an address.
     ///
     /// # Arguments
-    /// 
+    ///
     /// * `addr` - Address to join from
-    /// 
+    ///
     /// # Example
     ///
     /// ```
@@ -610,23 +610,20 @@ impl Kad {
     }
 
     /// Resolve an ID into a peer
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `id` - ID to resolve
-    /// 
+    ///
     /// # Return value
-    /// 
+    ///
     /// If peer doesn't exist in routing table, returns a list of all addresses that respond with a valid key and ID.  
     /// Otherwise, returns addresses from routing table.
     pub fn resolve(self: &Arc<Self>, id: Hash) -> Vec<Addr> {
         let rt = self.runtime.handle();
 
         if let Some(n) = rt.block_on(self.node.table.clone().find(id)) {
-            return n.addresses
-                .iter()
-                .map(|x| x.0)
-                .collect();
+            return n.addresses.iter().map(|x| x.0).collect();
         }
 
         let addresses = rt.block_on(self.node.clone().resolve(id));
@@ -634,7 +631,7 @@ impl Kad {
         // remove all addresses whose keys don't resolve to desired ID
         addresses
             .iter()
-            .filter_map(|a| Some(dbg!(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok()))?)
+            .filter_map(|a| Some(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok())?)
             .map(|x| x.addr)
             .collect()
     }
@@ -702,9 +699,10 @@ macro_rules! kad_fn {
 
             handle.block_on(async {
                 match KadNetwork::connect_peer(kad.clone(), peer).await {
-                    Ok((conn, responding_peer)) => {
-                        if self.crypto.if_unknown(&responding_peer.id, || async {
-                            if let Ok((RpcResult::Key(key), _)) = conn.client.key(context::current()).await {
+                    Ok((conn, mut responding_peer)) => {
+                        if self.crypto.if_unknown(&responding_peer.id.clone(), || async {
+                            if let Ok((RpcResult::Key(key), ctx, _)) = conn.client.key(context::current()).await {
+                                responding_peer.id = ctx.id;
                                 if hash(key.as_str()) == responding_peer.id {
                                     self.crypto.entry(responding_peer.id, key.as_str()).await
                                 } else {
@@ -883,9 +881,10 @@ impl InnerKad {
         key,
         RpcOp::Key,
         SinglePeer,
-        |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
+        |node: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             // check if hash(key) == id then add to keystore
             if let RpcResult::Key(result) = res.0 {
+                resp.id = res.1.id;
                 if hash(result.as_str()) == resp.id {
                     if node.crypto.entry(resp.id, result.as_str()).await {
                         Ok(resp)
@@ -905,8 +904,9 @@ impl InnerKad {
         get_addresses,
         |id: Hash| RpcOp::GetAddresses(id),
         Vec<Addr>,
-        |_: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
+        |_: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
+                resp.id = res.1.id;
                 Ok((addrs, resp))
             } else {
                 Err(Box::new(resp))
@@ -920,8 +920,8 @@ impl InnerKad {
         RpcOp::Ping,
         SinglePeer,
         |_, res: RpcResults, mut resp: SinglePeer| async move {
-            if let RpcResult::Ping(id) = res.0 {
-                resp.id = id;
+            if let RpcResult::Ping = res.0 {
+                resp.id = res.1.id;
                 Ok(resp)
             } else {
                 Err(Box::new(resp))
@@ -937,7 +937,7 @@ impl InnerKad {
         bool,
         |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::Store = res.0.clone() {
-                if node.crypto.verify_results(&resp.id, &res).await {
+                if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((true, resp))
@@ -957,7 +957,7 @@ impl InnerKad {
         Vec<SinglePeer>,
         |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::FindNode(peers) = res.0.clone() {
-                if node.crypto.verify_results(&resp.id, &res).await {
+                if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((peers, resp))
@@ -977,7 +977,7 @@ impl InnerKad {
         Box<FindValueResult>,
         |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
             if let RpcResult::FindValue(result) = res.0.clone() {
-                if node.crypto.verify_results(&resp.id, &res).await {
+                if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
 
                     Ok((result, resp))
@@ -1031,7 +1031,9 @@ impl InnerKad {
         let mut addresses: Vec<Addr> = vec![];
 
         for peer in self.clone().iter_find_node(key).await {
-            if let Ok((addrs, _)) = tokio::task::block_in_place(|| self.clone().get_addresses(peer, key)) {
+            if let Ok((addrs, _)) =
+                tokio::task::block_in_place(|| self.clone().get_addresses(peer, key))
+            {
                 addresses.extend(addrs.iter());
             }
         }
@@ -1066,6 +1068,15 @@ impl InnerKad {
         }
 
         false
+    }
+
+    pub(crate) fn create_ctx(self: &Arc<Self>) -> RpcContext {
+        RpcContext {
+            id: self.table.id,
+            op: RpcOp::Nothing,
+            addr: self.addr,
+            timestamp: timestamp(),
+        }
     }
 }
 

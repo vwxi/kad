@@ -57,7 +57,7 @@ mod tests {
     #[traced_test]
     fn join_put_get() {
         let nodes: Vec<Arc<Kad>> = (0..4)
-            .map(|i| Kad::new(16010 + i, false, true).unwrap())
+            .map(|i| Kad::new(16000 + i, false, true).unwrap())
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
@@ -141,7 +141,7 @@ mod tests {
         let res = nodes[1].resolve(nodes[3].id());
 
         assert!(!res.is_empty());
-        assert!(*res.first().unwrap() == nodes[2].addr());
+        assert_eq!(*res.first().unwrap(), nodes[3].addr());
 
         nodes.into_iter().for_each(Kad::stop);
     }

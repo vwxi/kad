@@ -201,6 +201,7 @@ crate::util::pred_block! {
         }
 
         pub(crate) enum RpcOp {
+            Nothing,
             Key,
             Ping,
             GetAddresses(Hash),
@@ -220,7 +221,7 @@ crate::util::pred_block! {
         pub(crate) enum RpcResult {
             Bad,
             Key(String),
-            Ping(Hash),
+            Ping,
             Store,
             GetAddresses(Option<Vec<Addr>>),
             FindNode(Vec<SinglePeer>),
@@ -237,4 +238,4 @@ crate::util::pred_block! {
 }
 
 pub(crate) type RpcArgs = (RpcContext, String);
-pub(crate) type RpcResults = (RpcResult, String);
+pub(crate) type RpcResults = (RpcResult, RpcContext, String);

@@ -2,6 +2,12 @@
 
 kad is an implementation of a distributed hash table based on the [Kademlia protocol](https://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia-lncs.pdf) with features from [S/Kademlia](https://ieeexplore.ieee.org/document/4447808/) 
 
+## features
+
+- ID resolution
+- disjoint path lookups
+- data compression
+
 ## usage
 
 ```rust
@@ -22,3 +28,8 @@ if node.join(Addr(IpAddr::from_str("127.0.0.1"), 16162)) {
 
 node.stop();
 ```
+
+## todo
+
+- [ ] NAT traversal
+- [ ] multiaddr support 
