@@ -4,6 +4,7 @@
 
 use crate::{
     crypto::Crypto,
+    forward::Forward,
     routing::{consts as routing_consts, RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
     store::{consts as store_consts, Store, StoreEntry},
@@ -38,6 +39,7 @@ pub(crate) mod consts {
 // all of the different facets of the protocol
 pub(crate) struct InnerKad {
     pub(crate) addr: Addr,
+    pub(crate) external_addr: Addr,
     pub(crate) crypto: Crypto,
     pub(crate) store: Store,
     pub(crate) table: TableRef,
@@ -76,10 +78,10 @@ impl Kad {
     /// # Panics
     ///
     /// All panics should be caught and returned as an `Err`
-    pub fn new(port: u16, ipv6: bool, local: bool) -> std::thread::Result<Arc<Self>> {
+    pub fn new<F: Forward>(port: u16, ipv6: bool, local: bool) -> std::thread::Result<Arc<Self>> {
         std::panic::catch_unwind(|| {
             Arc::new_cyclic(|gadget| {
-                let n = InnerKad::new(port, ipv6, local, gadget.clone());
+                let n = InnerKad::new::<F>(port, ipv6, local, gadget.clone());
                 let rt = Runtime::new().expect("could not create Kad runtime object");
 
                 Kad {
@@ -114,7 +116,7 @@ impl Kad {
     /// # Panics
     ///
     /// All panics should be caught and returned as an `Err`
-    pub fn new_from_file(
+    pub fn new_from_file<F: Forward>(
         port: u16,
         ipv6: bool,
         local: bool,
@@ -123,8 +125,14 @@ impl Kad {
     ) -> std::thread::Result<Arc<Self>> {
         std::panic::catch_unwind(|| {
             Arc::new_cyclic(|gadget| {
-                let n =
-                    InnerKad::new_from_file(port, ipv6, local, gadget.clone(), priv_key, pub_key);
+                let n = InnerKad::new_from_file::<F>(
+                    port,
+                    ipv6,
+                    local,
+                    gadget.clone(),
+                    priv_key,
+                    pub_key,
+                );
                 let rt = Runtime::new().expect("could not create Kad runtime object");
 
                 Kad {
@@ -167,8 +175,10 @@ impl Kad {
                 let c = Crypto::new(innerkad_gadget.clone()).expect("could not initialize crypto");
                 let hkey = hash(c.public_key_as_string().unwrap().as_str());
 
+                let a = Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
                 let kn = InnerKad {
-                    addr: Addr(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    addr: a,
+                    external_addr: a,
                     table: RoutingTable::new(
                         if let Some(i) = id { i } else { hkey },
                         innerkad_gadget.clone(),
@@ -319,7 +329,7 @@ impl Kad {
 
     /// Returns the resolved address of a Kad object
     pub fn addr(self: &Arc<Self>) -> Addr {
-        self.node.addr
+        self.node.external_addr
     }
 
     /// Returns the node ID associated with a Kad object
@@ -749,7 +759,12 @@ macro_rules! kad_fn {
 
 impl InnerKad {
     // TODO: implement non-local forwarding of some sort
-    pub(crate) fn new(port: u16, ipv6: bool, local: bool, k: Weak<Kad>) -> Arc<InnerKad> {
+    pub(crate) fn new<F: Forward>(
+        port: u16,
+        ipv6: bool,
+        local: bool,
+        k: Weak<Kad>,
+    ) -> Arc<InnerKad> {
         let a = (
             match (local, ipv6) {
                 (true, true) => IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -761,7 +776,7 @@ impl InnerKad {
         );
 
         if !local {
-            todo!();
+            F::forward(ipv6, port, "kad").expect("could not forward port");
         }
 
         Arc::new_cyclic(|gadget| {
@@ -772,8 +787,17 @@ impl InnerKad {
                     .as_str(),
             );
 
+            let a = Addr(a.0, a.1);
             let kn = InnerKad {
-                addr: Addr(a.0, a.1),
+                addr: a,
+                external_addr: if local {
+                    a
+                } else {
+                    Addr(
+                        F::external_ip().expect("could not acquire external IP address"),
+                        a.1,
+                    )
+                },
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
@@ -795,7 +819,7 @@ impl InnerKad {
         })
     }
 
-    pub(crate) fn new_from_file(
+    pub(crate) fn new_from_file<F: Forward>(
         port: u16,
         ipv6: bool,
         local: bool,
@@ -814,7 +838,7 @@ impl InnerKad {
         );
 
         if !local {
-            todo!();
+            F::forward(ipv6, port, "kad").expect("could not forward port");
         }
 
         Arc::new_cyclic(|gadget| {
@@ -826,8 +850,17 @@ impl InnerKad {
                     .as_str(),
             );
 
+            let a = Addr(a.0, a.1);
             let kn = InnerKad {
-                addr: Addr(a.0, a.1),
+                addr: a,
+                external_addr: if local {
+                    a
+                } else {
+                    Addr(
+                        F::external_ip().expect("could not acquire external IP address"),
+                        a.1,
+                    )
+                },
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
@@ -1085,7 +1118,7 @@ impl InnerKad {
         RpcContext {
             id: self.table.id,
             op: RpcOp::Nothing,
-            addr: self.addr,
+            addr: self.external_addr,
             timestamp: timestamp(),
         }
     }

@@ -1,4 +1,5 @@
 mod crypto;
+pub mod forward;
 mod lookup;
 pub mod node;
 mod routing;

@@ -382,6 +382,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     use crate::{
+        forward::NoFwd,
         node::{Kad, ResponsiveMockPinger},
         routing::consts::BUCKET_SIZE,
         util::{generate_peer, hash, Addr, Data, FindValueResult, Hash, Peer, SinglePeer, Value},
@@ -395,8 +396,8 @@ mod tests {
     #[traced_test]
     fn key() {
         let (first, second) = (
-            Kad::new(16161, false, true).unwrap(),
-            Kad::new(16162, false, true).unwrap(),
+            Kad::new::<NoFwd>(16161, false, true).unwrap(),
+            Kad::new::<NoFwd>(16162, false, true).unwrap(),
         );
 
         first.clone().serve().unwrap();
@@ -427,8 +428,8 @@ mod tests {
     #[test]
     fn get_addresses() {
         let (first, second) = (
-            Kad::new(16163, false, true).unwrap(),
-            Kad::new(16164, false, true).unwrap(),
+            Kad::new::<NoFwd>(16163, false, true).unwrap(),
+            Kad::new::<NoFwd>(16164, false, true).unwrap(),
         );
 
         first.clone().serve().unwrap();
@@ -473,8 +474,8 @@ mod tests {
     #[test]
     fn store() {
         let (first, second) = (
-            Kad::new(16165, false, true).unwrap(),
-            Kad::new(16166, false, true).unwrap(),
+            Kad::new::<NoFwd>(16165, false, true).unwrap(),
+            Kad::new::<NoFwd>(16166, false, true).unwrap(),
         );
 
         first.clone().serve().unwrap();
@@ -507,8 +508,8 @@ mod tests {
     #[test]
     fn find_node() {
         let (first, second) = (
-            Kad::new(16167, false, true).unwrap(),
-            Kad::new(16168, false, true).unwrap(),
+            Kad::new::<NoFwd>(16167, false, true).unwrap(),
+            Kad::new::<NoFwd>(16168, false, true).unwrap(),
         );
 
         first.clone().serve().unwrap();
@@ -551,8 +552,8 @@ mod tests {
     #[test]
     fn find_value() {
         let (first, second) = (
-            Kad::new(16169, false, true).unwrap(),
-            Kad::new(16170, false, true).unwrap(),
+            Kad::new::<NoFwd>(16169, false, true).unwrap(),
+            Kad::new::<NoFwd>(16170, false, true).unwrap(),
         );
         first.clone().serve().unwrap();
         second.clone().serve().unwrap();

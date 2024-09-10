@@ -440,6 +440,7 @@ impl InnerKad {
 #[cfg(test)]
 mod tests {
     use crate::{
+        forward::NoFwd,
         node::{consts, Kad},
         util::{hash, FindValueResult, Hash, Value},
     };
@@ -450,7 +451,7 @@ mod tests {
 
     fn setup(offset: u16) -> Vec<Arc<Kad>> {
         let nodes: Vec<Arc<Kad>> = (0..5)
-            .map(|i| Kad::new(offset + i, false, true).unwrap())
+            .map(|i| Kad::new::<NoFwd>(offset + i, false, true).unwrap())
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 

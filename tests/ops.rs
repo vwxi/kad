@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use kad::{
+        forward::NoFwd,
         node::Kad,
         util::{Kvs, Peer},
     };
@@ -10,7 +11,7 @@ mod tests {
     #[test]
     #[traced_test]
     fn serve() {
-        let kad = Kad::new(16152, false, true).unwrap();
+        let kad = Kad::new::<NoFwd>(16152, false, true).unwrap();
         kad.clone().serve().unwrap();
 
         std::thread::sleep(Duration::from_secs(1));
@@ -22,8 +23,8 @@ mod tests {
     #[traced_test]
     fn ping() {
         let (kad1, kad2) = (
-            Kad::new(16150, false, true).unwrap(),
-            Kad::new(16151, false, true).unwrap(),
+            Kad::new::<NoFwd>(16150, false, true).unwrap(),
+            Kad::new::<NoFwd>(16151, false, true).unwrap(),
         );
 
         kad1.clone().serve().unwrap();
@@ -57,7 +58,7 @@ mod tests {
     #[traced_test]
     fn join_put_get() {
         let nodes: Vec<Arc<Kad>> = (0..4)
-            .map(|i| Kad::new(16000 + i, false, true).unwrap())
+            .map(|i| Kad::new::<NoFwd>(16000 + i, false, true).unwrap())
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
@@ -96,8 +97,8 @@ mod tests {
     #[traced_test]
     fn put_compressed() {
         let (kad1, kad2) = (
-            Kad::new(16153, false, true).unwrap(),
-            Kad::new(16154, false, true).unwrap(),
+            Kad::new::<NoFwd>(16153, false, true).unwrap(),
+            Kad::new::<NoFwd>(16154, false, true).unwrap(),
         );
 
         kad1.clone().serve().unwrap();
@@ -131,7 +132,7 @@ mod tests {
     #[test]
     fn resolve() {
         let nodes: Vec<Arc<Kad>> = (0..4)
-            .map(|i| Kad::new(16010 + i, false, true).unwrap())
+            .map(|i| Kad::new::<NoFwd>(16010 + i, false, true).unwrap())
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 

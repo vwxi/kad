@@ -212,6 +212,7 @@ mod tests {
     use tracing_test::traced_test;
 
     use crate::{
+        forward::NoFwd,
         node::Kad,
         store::{consts::REPUBLISH_TIME, Data, ProviderRecord, Value},
         util::{hash, timestamp, Hash},
@@ -220,7 +221,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn store_valid_data() {
-        let kad = Kad::new(16161, false, true).unwrap();
+        let kad = Kad::new::<NoFwd>(16161, false, true).unwrap();
         let entry = kad
             .node
             .store
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn store_invalid_data() {
         // bad signatures
-        let kad = Kad::new(16161, false, true).unwrap();
+        let kad = Kad::new::<NoFwd>(16161, false, true).unwrap();
         let mut entry = kad
             .node
             .store
