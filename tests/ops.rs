@@ -75,13 +75,14 @@ mod tests {
         assert!(res.is_empty());
 
         let res: Kvs<String> = nodes[3].get("good morning", true);
+        let val = String::from("hello");
 
         assert!(!res.is_empty());
         assert!(res
             .iter()
             .fold(res.first(), |acc, item| {
                 acc.and_then(|s| {
-                    if s == item && item.value == String::from("hello") {
+                    if s == item && item.value == val {
                         Some(s)
                     } else {
                         None
