@@ -4,7 +4,7 @@ mod tests {
         node::Kad,
         util::{Kvs, Peer},
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{net::IpAddr, sync::Arc, time::Duration};
     use tracing_test::traced_test;
 
     #[test]
@@ -62,7 +62,8 @@ mod tests {
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
         for i in &nodes[1..] {
-            assert!(i.join(nodes[0].addr()));
+            let a = nodes[0].addr();
+            assert!(i.join(&IpAddr::to_string(&a.0), a.1));
         }
 
         let res = nodes[0]
@@ -104,7 +105,7 @@ mod tests {
 
         let addr2 = kad2.clone().addr();
 
-        assert!(kad1.join(addr2));
+        assert!(kad1.join(&addr2.0.to_string(), addr2.1));
         assert!(kad1
             .put(
                 "hello",
@@ -134,9 +135,9 @@ mod tests {
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
-        assert!(nodes[0].join(nodes[1].addr()));
-        assert!(nodes[1].join(nodes[2].addr()));
-        assert!(nodes[0].join(nodes[3].addr()));
+        assert!(nodes[0].join(&nodes[1].addr().0.to_string(), nodes[1].addr().1));
+        assert!(nodes[1].join(&nodes[2].addr().0.to_string(), nodes[2].addr().1));
+        assert!(nodes[0].join(&nodes[3].addr().0.to_string(), nodes[3].addr().1));
 
         let res = nodes[1].resolve(nodes[3].id());
 

@@ -17,11 +17,14 @@ use anyhow::Result;
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::{Arc, Weak};
 use std::{
     io::prelude::*,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
+};
+use std::{
+    str::FromStr,
+    sync::{Arc, Weak},
 };
 use tarpc::context;
 use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
@@ -597,7 +600,7 @@ impl Kad {
     /// let node = Kad::new(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
-    /// assert!(node.join(Addr(IpAddr::from("127.0.0.1"), 12345)));
+    /// assert!(node.join("127.0.0.1", 16162));
     ///
     /// node.stop();
     /// ```
@@ -605,7 +608,15 @@ impl Kad {
     /// # Return value
     ///
     /// Returns true if the join procedure was successful.
-    pub fn join(self: &Arc<Self>, addr: Addr) -> bool {
+    pub fn join(self: &Arc<Self>, ip: &str, port: u16) -> bool {
+        let ip = IpAddr::from_str(ip);
+
+        if ip.is_err() {
+            return false;
+        }
+
+        let addr = Addr(ip.unwrap(), port);
+
         self.runtime.handle().block_on(self.node.clone().join(addr))
     }
 
