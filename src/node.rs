@@ -13,10 +13,10 @@ use crate::{
     },
     U256,
 };
+use anyhow::Result;
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use serde::{de::DeserializeOwned, Serialize};
-use std::error::Error;
 use std::sync::{Arc, Weak};
 use std::{
     io::prelude::*,
@@ -156,7 +156,7 @@ impl Kad {
         main: bool,
         refresh: bool,
         republish: bool,
-    ) -> Result<Arc<Self>, Box<dyn Error>> {
+    ) -> Result<Arc<Self>> {
         let rt = Runtime::new().expect("could not create Kad runtime object");
 
         let new = Arc::new_cyclic(|kad_gadget| {
@@ -241,7 +241,7 @@ impl Kad {
     /// # Errors
     ///
     /// May return an `Err` if the serving thread was not successfully created.
-    pub fn serve(self: Arc<Self>) -> std::io::Result<()> {
+    pub fn serve(self: Arc<Self>) -> Result<()> {
         let rt = self.runtime.handle();
 
         {
@@ -368,7 +368,7 @@ impl Kad {
         key: &str,
         value: &T,
         compress: bool,
-    ) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
+    ) -> Result<Vec<SinglePeer>> {
         // compress and serialize
         match serde_json::to_string(&value) {
             Ok(v) => Ok(self
@@ -385,7 +385,7 @@ impl Kad {
                         Data::Raw(v.into())
                     }),
                 ))),
-            Err(e) => Err(Box::new(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -421,7 +421,7 @@ impl Kad {
     /// # Errors
     ///
     /// Returns any errors during the process.
-    pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>, Box<dyn Error>> {
+    pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>> {
         let record = self
             .node
             .store
@@ -838,7 +838,7 @@ impl InnerKad {
         })
     }
 
-    pub(crate) fn serve(self: Arc<Self>) -> std::io::Result<tokio::task::AbortHandle> {
+    pub(crate) fn serve(self: Arc<Self>) -> Result<tokio::task::AbortHandle> {
         let parent = self.parent.upgrade().unwrap();
 
         parent.runtime.handle().block_on(KadNetwork::serve(self))

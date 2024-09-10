@@ -4,12 +4,12 @@
 
 use core::fmt;
 use std::{
-    error::Error,
-    net::{IpAddr, Ipv4Addr},
+    net::IpAddr,
     num::ParseIntError,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::{anyhow, Result};
 use rand::{distributions::Standard, prelude::Distribution, Rng};
 use rsa::sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
@@ -84,23 +84,14 @@ impl Peer {
     /// # Errors
     ///
     /// Returns an `Err` if there are no addresses in the address list.
-    pub fn single_peer(&self) -> Result<SinglePeer, Box<dyn Error>> {
-        let nothing: Addr = Addr(IpAddr::from(Ipv4Addr::UNSPECIFIED), 0);
-
+    pub fn single_peer(&self) -> Result<SinglePeer> {
         Ok(SinglePeer {
             id: self.id,
-            addr: if self.addresses.is_empty() {
-                nothing
-            } else {
-                match self
-                    .addresses
-                    .first()
-                    .ok_or(Err("cannot convert empty peer"))
-                {
-                    Ok(a) => a.0,
-                    Err(e) => e?,
-                }
-            },
+            addr: self
+                .addresses
+                .first()
+                .ok_or(anyhow!("no addresses in peer object"))?
+                .0,
         })
     }
 }
@@ -160,6 +151,8 @@ pub(crate) fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
 
 #[cfg(test)]
 pub(crate) fn generate_peer(pid: Option<Hash>) -> SinglePeer {
+    use std::net::Ipv4Addr;
+
     SinglePeer {
         id: if let Some(pid_) = pid {
             pid_

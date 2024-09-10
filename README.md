@@ -11,7 +11,8 @@ kad is an implementation of a distributed hash table based on the [Kademlia prot
 ## usage
 
 ```rust
-let node = Kad::new(16161, false, true);
+let node = Kad::new(16161, false, true).unwrap();
+node.clone().serve().unwrap();
 
 if node.join(Addr(IpAddr::from_str("127.0.0.1"), 16162)) {
     if let Ok(missed) = node.put("good morning", &String::from("hello"), false) {

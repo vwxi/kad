@@ -2,13 +2,14 @@ use crate::{
     node::{InnerKad, Kad, RealPinger},
     util::{Addr, FindValueResult, Peer, RpcArgs, RpcOp, RpcResult, RpcResults, SinglePeer},
 };
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable},
     prelude::*,
 };
 use serde::{Deserialize, Serialize};
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tarpc::{
     client, context,
     server::{BaseChannel, Channel},
@@ -274,7 +275,7 @@ pub(crate) trait Network {
         (server_, client_)
     }
 
-    async fn serve(node_: Arc<InnerKad>) -> std::io::Result<tokio::task::AbortHandle> {
+    async fn serve(node_: Arc<InnerKad>) -> Result<tokio::task::AbortHandle> {
         let addr = node_.addr;
         let kad = node_.parent.upgrade().unwrap();
 
@@ -307,11 +308,11 @@ pub(crate) trait Network {
                         .await;
                 })
                 .abort_handle()),
-            Err(err) => Err(err),
+            Err(err) => Err(err.into()),
         }
     }
 
-    async fn connect(kad: Arc<Kad>, addr: Addr) -> Result<Service, Box<dyn Error>> {
+    async fn connect(kad: Arc<Kad>, addr: Addr) -> Result<Service> {
         let to = addr.to();
         let mut transport = tarpc::serde_transport::tcp::connect(&to, Json::default);
         transport.config_mut().max_frame_length(usize::MAX);

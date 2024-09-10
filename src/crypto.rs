@@ -2,6 +2,7 @@ use crate::node::InnerKad;
 use crate::util::{
     decode_hex, timestamp, Addr, Hash, RpcArgs, RpcContext, RpcOp, RpcResult, RpcResults,
 };
+use anyhow::Result;
 use futures::Future;
 use rsa::pkcs1::{
     self, DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
@@ -12,7 +13,6 @@ use rsa::sha2::Sha256;
 use rsa::signature::{RandomizedSigner, Verifier};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::collections::BTreeMap;
-use std::error::Error;
 use std::path::Path;
 use std::sync::Weak;
 use tokio::sync::RwLock;
@@ -35,7 +35,7 @@ pub(crate) struct Crypto {
 
 impl Crypto {
     // randomly generate key
-    pub(crate) fn new(node_: Weak<InnerKad>) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(node_: Weak<InnerKad>) -> Result<Self> {
         let mut rng = rand::thread_rng();
         let private_key = RsaPrivateKey::new(&mut rng, consts::KEY_BITS)?;
         let public_key = RsaPublicKey::from(private_key.clone());
@@ -53,7 +53,7 @@ impl Crypto {
         node_: Weak<InnerKad>,
         priv_file: &str,
         pub_file: &str,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self> {
         let (priv_path, pub_path) = (Path::new(priv_file), Path::new(pub_file));
         let (private_key, public_key) = (
             RsaPrivateKey::read_pkcs1_pem_file(priv_path)?,
@@ -69,11 +69,11 @@ impl Crypto {
         })
     }
 
-    pub(crate) fn public_key_as_string(&self) -> Result<String, Box<dyn Error>> {
+    pub(crate) fn public_key_as_string(&self) -> Result<String> {
         Ok(self.public.to_pkcs1_pem(pkcs1::LineEnding::LF)?)
     }
 
-    pub(crate) fn to_file(&self, priv_file: &str, pub_file: &str) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn to_file(&self, priv_file: &str, pub_file: &str) -> Result<()> {
         self.private
             .write_pkcs1_pem_file(Path::new(priv_file), pkcs1::LineEnding::LF)?;
         self.public
