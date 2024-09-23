@@ -12,6 +12,7 @@ futures = "0.3.30"
 igd = "0.12.1"
 local-ip-address = "0.6.2"
 rand = "0.8.5"
+resolve = "0.2.0"
 rsa = { version = "0.9.6", features = ["sha2"] }
 serde = { version = "1.0.202", features = ["rc"] }
 serde_json = "1.0.120"

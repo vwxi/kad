@@ -15,7 +15,7 @@ kad is an implementation of a distributed hash table based on the [Kademlia prot
 let node = Kad::new::<IGD>(16161, false, true).unwrap();
 node.clone().serve().unwrap();
 
-if node.join("127.0.0.1", 16162) {
+if node.join("bootstrap.example", 16162) {
     if let Ok(missed) = node.put("good morning", &String::from("hello"), false) {
         assert!(missed.is_empty());
         
@@ -33,5 +33,4 @@ node.stop();
 
 ## todo
 
-- [ ] DNS resolution
-- [ ] B58 addressable peers/content
+- [ ] B58 addressable content
