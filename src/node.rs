@@ -156,12 +156,31 @@ impl Kad {
     ///
     /// * `priv_key` - path to private key file
     /// * `pub_key` - path to public key file
+    /// * `table_file` - path to routing table state file
     ///
     /// # Return value
     ///
     /// Returns true if successful, false otherwise.
-    pub fn to_file(self: &Arc<Self>, priv_key: &str, pub_key: &str) -> bool {
+    pub fn to_file(
+        self: &Arc<Self>,
+        priv_key: &str,
+        pub_key: &str,
+        table_file: Option<&str>,
+    ) -> bool {
         self.node.crypto.to_file(priv_key, pub_key).is_ok()
+            && if let Some(tf) = table_file {
+                let buckets = self
+                    .runtime
+                    .handle()
+                    .block_on(self.node.table.clone().get_all_buckets());
+                if let Ok(c) = serde_json::to_string(&buckets) {
+                    fs::write(tf, c).is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
     }
 
     #[cfg(test)]
