@@ -270,17 +270,11 @@ impl RoutingTable {
             let inner = node.as_ref().unwrap();
             let mut current = inner.write().await;
 
-            debug!(
-                "looking at prefix {:#x} cutoff {} - TARGET: prefix {:#x} cutoff {}",
-                current.prefix, current.cutoff, bkt.prefix, bkt.cutoff
-            );
-
             if current.prefix > bkt.prefix {
                 return;
             }
 
-            if dbg!(bkt.prefix) == dbg!(current.prefix) && bkt.cutoff == current.cutoff {
-                debug!("put");
+            if bkt.prefix == current.prefix && bkt.cutoff == current.cutoff {
                 current.bucket = Some(bkt.bucket.clone());
                 return;
             }
@@ -300,10 +294,8 @@ impl RoutingTable {
                 if bkt.prefix & (Hash::from(1) << (consts::HASH_SIZE - current.cutoff - 1))
                     == Hash::zero()
                 {
-                    debug!("left");
                     current.left.as_ref().unwrap().clone()
                 } else {
-                    debug!("right");
                     current.right.as_ref().unwrap().clone()
                 },
             );
@@ -316,7 +308,6 @@ impl RoutingTable {
 
     pub(crate) async fn make_from_buckets(self: Arc<Self>, bkts: Vec<SeBucket>) {
         for bkt in bkts {
-            debug!("bucket: {:?}", bkt);
             self.clone()
                 .make_traverse(self.root.clone(), Arc::new(bkt))
                 .await;
