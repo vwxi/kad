@@ -30,7 +30,6 @@ pub(crate) struct Store {
     node: Weak<InnerKad>,
 }
 
-// TODO: store value compression
 impl Store {
     pub(crate) fn new(node_: Weak<InnerKad>) -> Self {
         Store {

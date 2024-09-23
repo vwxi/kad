@@ -4,11 +4,12 @@ use crate::{
 };
 use futures::future::{BoxFuture, FutureExt};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     sync::{Arc, Weak},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 pub(crate) mod consts {
@@ -36,11 +37,18 @@ pub(crate) mod consts {
 // the prefix trie model is used in this implementation.
 // this may be changed in the future.
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Bucket {
     pub(crate) last_seen: u64,
     pub(crate) peers: Vec<Peer>,
     pub(crate) cache: Vec<SinglePeer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SeBucket {
+    pub(crate) prefix: Hash,
+    pub(crate) cutoff: usize,
+    pub(crate) bucket: Bucket,
 }
 
 #[derive(Debug)]
@@ -225,6 +233,94 @@ impl RoutingTable {
             self.dfs(right, f).await;
         }
         .boxed()
+    }
+
+    pub(crate) async fn get_all_buckets(self: Arc<Self>) -> Vec<SeBucket> {
+        let bkts: Arc<Mutex<Vec<SeBucket>>> = Arc::new(Mutex::new(vec![]));
+
+        self.clone()
+            .dfs(self.root.clone(), {
+                let cl = bkts.clone();
+
+                move |_, t: InnerTrieRef| {
+                    let c = cl.clone();
+
+                    async move {
+                        let lock = t.read().await;
+                        let mut b = c.lock().await;
+
+                        b.push(SeBucket {
+                            bucket: lock.bucket.as_ref().unwrap().clone(),
+                            prefix: lock.prefix,
+                            cutoff: lock.cutoff,
+                        });
+                    }
+                }
+            })
+            .await;
+
+        match Arc::try_unwrap(bkts) {
+            Ok(inner) => inner.into_inner(),
+            Err(_) => vec![],
+        }
+    }
+
+    fn make_traverse(self: Arc<Self>, node: TrieRef, bkt: Arc<SeBucket>) -> BoxFuture<'static, ()> {
+        async move {
+            let inner = node.as_ref().unwrap();
+            let mut current = inner.write().await;
+
+            debug!(
+                "looking at prefix {:#x} cutoff {} - TARGET: prefix {:#x} cutoff {}",
+                current.prefix, current.cutoff, bkt.prefix, bkt.cutoff
+            );
+
+            if current.prefix > bkt.prefix {
+                return;
+            }
+
+            if dbg!(bkt.prefix) == dbg!(current.prefix) && bkt.cutoff == current.cutoff {
+                debug!("put");
+                current.bucket = Some(bkt.bucket.clone());
+                return;
+            }
+
+            if let (None, None) = (&current.left, &current.right) {
+                let new_bit = Hash::from(1) << (consts::HASH_SIZE - (current.cutoff + 1));
+
+                current.left = Some(Trie::new(current.prefix, current.cutoff + 1, false));
+                current.right = Some(Trie::new(
+                    current.prefix | new_bit,
+                    current.cutoff + 1,
+                    false,
+                ));
+            }
+
+            let next = Some(
+                if bkt.prefix & (Hash::from(1) << (consts::HASH_SIZE - current.cutoff - 1))
+                    == Hash::zero()
+                {
+                    debug!("left");
+                    current.left.as_ref().unwrap().clone()
+                } else {
+                    debug!("right");
+                    current.right.as_ref().unwrap().clone()
+                },
+            );
+
+            drop(current);
+            self.clone().make_traverse(next, bkt).await;
+        }
+        .boxed()
+    }
+
+    pub(crate) async fn make_from_buckets(self: Arc<Self>, bkts: Vec<SeBucket>) {
+        for bkt in bkts {
+            debug!("bucket: {:?}", bkt);
+            self.clone()
+                .make_traverse(self.root.clone(), Arc::new(bkt))
+                .await;
+        }
     }
 
     pub(crate) async fn find(self: Arc<Self>, id: Hash) -> Option<Peer> {
@@ -835,5 +931,57 @@ mod tests {
 
         assert!(stale.is_none());
         assert!(added.is_some());
+    }
+
+    #[traced_test]
+    #[test]
+    fn save_load() {
+        let kad = Kad::mock(
+            16161,
+            Some(Hash::from(1) << (consts::HASH_SIZE - 1)),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let table = kad.node.table.clone();
+
+        for i in 0..consts::BUCKET_SIZE {
+            block_on(
+                table
+                    .clone()
+                    .update::<ResponsiveMockPinger>(generate_peer(Some(table.id | Hash::from(i)))),
+            );
+        }
+
+        let to_stale = generate_peer(Some(Hash::from(1)));
+
+        block_on(table.clone().update::<UnresponsiveMockPinger>(to_stale));
+
+        // insert far nodes
+        for i in 2..(consts::BUCKET_SIZE + 1) {
+            block_on(
+                table
+                    .clone()
+                    .update::<UnresponsiveMockPinger>(generate_peer(Some(Hash::from(i)))),
+            );
+        }
+
+        let buckets = block_on(table.clone().get_all_buckets());
+
+        let kad2 = Kad::mock(
+            16162,
+            Some(Hash::from(1) << (consts::HASH_SIZE - 1)),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let table2 = kad2.node.table.clone();
+        block_on(table2.clone().make_from_buckets(buckets.clone()));
+
+        let buckets2 = block_on(table2.get_all_buckets());
+
+        assert!(buckets.iter().zip(buckets2.iter()).all(|(x, y)| x == y));
     }
 }

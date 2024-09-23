@@ -19,6 +19,7 @@ use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
+    fs,
     io::prelude::*,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
@@ -104,6 +105,7 @@ impl Kad {
     /// * `local` - bind to localhost flag
     /// * `priv_key` - path to private key file
     /// * `pub_key` - path to private key file
+    /// * `table_file` - path to stored routing table state
     ///
     /// # Errors
     ///
@@ -122,16 +124,18 @@ impl Kad {
         local: bool,
         priv_key: &str,
         pub_key: &str,
+        table_file: Option<&str>,
     ) -> std::thread::Result<Arc<Self>> {
         std::panic::catch_unwind(|| {
             Arc::new_cyclic(|gadget| {
-                let n = InnerKad::new_from_file::<F>(
+                let n = InnerKad::new_from_files::<F>(
                     port,
                     ipv6,
                     local,
                     gadget.clone(),
                     priv_key,
                     pub_key,
+                    table_file,
                 );
                 let rt = Runtime::new().expect("could not create Kad runtime object");
 
@@ -758,7 +762,6 @@ macro_rules! kad_fn {
 }
 
 impl InnerKad {
-    // TODO: implement non-local forwarding of some sort
     pub(crate) fn new<F: Forward>(
         port: u16,
         ipv6: bool,
@@ -819,13 +822,14 @@ impl InnerKad {
         })
     }
 
-    pub(crate) fn new_from_file<F: Forward>(
+    pub(crate) fn new_from_files<F: Forward>(
         port: u16,
         ipv6: bool,
         local: bool,
         k: Weak<Kad>,
         priv_key: &str,
         pub_key: &str,
+        table_file: Option<&str>,
     ) -> Arc<InnerKad> {
         let a = (
             match (local, ipv6) {
@@ -866,6 +870,18 @@ impl InnerKad {
                 crypto: c,
                 parent: k,
             };
+
+            if let Some(tbl_file) = table_file {
+                block_on(
+                    kn.table.clone().make_from_buckets(
+                        serde_json::from_str(
+                            &fs::read_to_string(tbl_file)
+                                .expect("routing table file could not be read"),
+                        )
+                        .expect("invalid routing table file format"),
+                    ),
+                );
+            }
 
             // add own key
             block_on(

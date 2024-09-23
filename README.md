@@ -33,4 +33,5 @@ node.stop();
 
 ## todo
 
-- [ ] NAT traversal
+- [ ] DNS resolution
+- [ ] B58 addressable peers/content
