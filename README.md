@@ -30,7 +30,3 @@ if node.join("bootstrap.example", 16162) {
 
 node.stop();
 ```
-
-## todo
-
-- [ ] B58 addressable content

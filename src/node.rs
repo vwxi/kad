@@ -467,23 +467,22 @@ impl Kad {
         self.put(key, &record, false)
     }
 
-    fn lookup(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<FindValueResult> {
-        let h = hash(key);
+    fn lookup(self: &Arc<Self>, key: Hash, disjoint: bool) -> Vec<FindValueResult> {
         let rt = self.runtime.handle();
 
         if disjoint {
             rt.block_on(self.node.clone().disjoint_lookup_value(
-                h,
+                key,
                 consts::DISJOINT_PATHS,
                 consts::QUORUM,
             ))
         } else {
-            let peers = rt.block_on(self.node.table.clone().find_alpha_peers(h));
+            let peers = rt.block_on(self.node.table.clone().find_alpha_peers(key));
 
             vec![rt.block_on(
                 self.node
                     .clone()
-                    .lookup_value(peers, None, h, consts::QUORUM),
+                    .lookup_value(peers, None, key, consts::QUORUM),
             )]
         }
     }
@@ -523,6 +522,46 @@ impl Kad {
     pub fn get<T: Serialize + DeserializeOwned>(
         self: &Arc<Self>,
         key: &str,
+        disjoint: bool,
+    ) -> Vec<Kv<T>> {
+        self.get_hash(hash(key), disjoint)
+    }
+
+    /// Get values from the network.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kad::{node::Kad, util::{Kvs, Hash}};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// let values: Kvs<String> = node.get_hash(Hash::from(111), false);
+    ///
+    /// node.stop();
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - search key
+    /// * `disjoint` - use disjoint lookups
+    ///
+    /// # Behavior
+    ///
+    /// If `disjoint` is set to true, a disjoint lookup will take place. It is preferable to use disjoint lookups to prevent value poisoning.  
+    /// ***NOTE:*** If the routing table contains less than `DISJOINT_PATHS` nodes during a disjoint lookup, then no values will return.
+    ///
+    /// All values of a different type than `T` will be rejected.  
+    ///
+    /// # Return value
+    ///
+    /// Returns a list of retrieved valid values.
+    pub fn get_hash<T: Serialize + DeserializeOwned>(
+        self: &Arc<Self>,
+        key: Hash,
         disjoint: bool,
     ) -> Vec<Kv<T>> {
         let results = self.lookup(key, disjoint);
@@ -570,6 +609,28 @@ impl Kad {
             .collect()
     }
 
+    /// Get nodes nearest to a given ID
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use kad::{node::Kad, util::Hash};
+    ///
+    /// let node = Kad::new(16161, false, true).unwrap();
+    /// node.clone().serve().unwrap();
+    ///
+    /// // join etc...
+    ///
+    /// let nodes = node.get_nodes(Hash::from(0));
+    ///
+    /// node.stop();
+    /// ```
+    pub fn get_nodes(self: &Arc<Self>, key: Hash) -> Vec<Peer> {
+        self.runtime
+            .handle()
+            .block_on(self.node.clone().iter_find_node(key))
+    }
+
     /// Get providers for a key on the network.
     ///
     /// # Example
@@ -600,7 +661,7 @@ impl Kad {
     ///
     /// Returns a list of all peers contacted that did not store the value if successful.
     pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
-        let results = self.lookup(key, disjoint);
+        let results = self.lookup(hash(key), disjoint);
 
         results
             .into_iter()

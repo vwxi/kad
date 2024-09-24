@@ -137,6 +137,23 @@ pub fn hash(s: &str) -> Hash {
     Hash::from_little_endian(hasher.finalize().as_mut_slice())
 }
 
+pub fn b58d(s: &str) -> Option<Hash> {
+    Some(Hash::from_little_endian(
+        bs58::decode(s)
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .into_vec()
+            .ok()?
+            .as_mut_slice(),
+    ))
+}
+
+pub fn b58e(h: Hash) -> String {
+    let mut temp: Vec<u8> = Vec::with_capacity(32);
+    h.to_little_endian(&mut temp[..]);
+
+    bs58::encode(temp.as_slice()).into_string()
+}
+
 pub(crate) fn timestamp() -> u64 {
     let t = SystemTime::now();
     t.duration_since(UNIX_EPOCH).unwrap().as_secs()
