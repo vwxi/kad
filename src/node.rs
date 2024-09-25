@@ -19,15 +19,12 @@ use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use resolve::resolve_host;
 use serde::{de::DeserializeOwned, Serialize};
+use std::{str::FromStr, sync::{Arc, Weak}};
 use std::{
     fs,
     io::prelude::*,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
-};
-use std::{
-    str::FromStr,
-    sync::{Arc, Weak},
 };
 use tarpc::context;
 use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
@@ -707,22 +704,16 @@ impl Kad {
     /// Returns true if the join procedure was successful.
     pub fn join(self: &Arc<Self>, ip: &str, port: u16) -> bool {
         if let Ok(ipp) = IpAddr::from_str(ip) {
-            return self
-                .runtime
-                .handle()
-                .block_on(self.node.clone().join(Addr(ipp, port)));
-        }
+            return self.runtime.handle().block_on(self.node.clone().join(Addr(ipp, port)));
+        } 
 
         if let Ok(ips) = resolve_host(ip) {
             if let Some(ip) = ips.peekable().peek() {
-                self.runtime
-                    .handle()
-                    .block_on(self.node.clone().join(Addr(*ip, port)))
+                self.runtime.handle().block_on(self.node.clone().join(Addr(*ip, port)))
             } else {
                 false
             }
         } else {
-            debug!("HUGH!!!!");
             false
         }
     }
