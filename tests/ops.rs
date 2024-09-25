@@ -5,7 +5,7 @@ mod tests {
         node::Kad,
         util::{Kvs, Peer},
     };
-    use std::{net::IpAddr, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
     use tracing_test::traced_test;
 
     #[test]
@@ -16,7 +16,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_secs(1));
 
-        kad.stop();
+        kad.stop::<NoFwd>();
     }
 
     #[test]
@@ -50,8 +50,8 @@ mod tests {
             assert_eq!(res.addr, addr1);
         }
 
-        kad1.stop();
-        kad2.stop();
+        kad1.stop::<NoFwd>();
+        kad2.stop::<NoFwd>();
     }
 
     #[test]
@@ -64,7 +64,7 @@ mod tests {
 
         for i in &nodes[1..] {
             let a = nodes[0].addr();
-            assert!(i.join(&IpAddr::to_string(&a.0), a.1));
+            assert!(i.join("127.0.0.1", a.1));
         }
 
         let res = nodes[0]
@@ -91,7 +91,7 @@ mod tests {
             })
             .is_some());
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
 
         let addr2 = kad2.clone().addr();
 
-        assert!(kad1.join(&addr2.0.to_string(), addr2.1));
+        assert!(kad1.join("127.0.0.1", addr2.1));
         assert!(kad1
             .put(
                 "hello",
@@ -125,8 +125,8 @@ mod tests {
 
         assert_eq!(v, res.first().unwrap().value);
 
-        kad1.stop();
-        kad2.stop();
+        kad1.stop::<NoFwd>();
+        kad2.stop::<NoFwd>();
     }
 
     #[traced_test]
@@ -137,15 +137,15 @@ mod tests {
             .collect();
         nodes.iter().for_each(|x| x.clone().serve().unwrap());
 
-        assert!(nodes[0].join(&nodes[1].addr().0.to_string(), nodes[1].addr().1));
-        assert!(nodes[1].join(&nodes[2].addr().0.to_string(), nodes[2].addr().1));
-        assert!(nodes[0].join(&nodes[3].addr().0.to_string(), nodes[3].addr().1));
+        assert!(nodes[0].join("127.0.0.1", nodes[1].addr().1));
+        assert!(nodes[1].join("127.0.0.1", nodes[2].addr().1));
+        assert!(nodes[0].join("127.0.0.1", nodes[3].addr().1));
 
         let res = nodes[1].resolve(nodes[3].id());
 
         assert!(!res.is_empty());
         assert_eq!(*res.first().unwrap(), nodes[3].addr());
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 }

@@ -420,8 +420,8 @@ mod tests {
 
         assert_eq!(result, second.node.crypto.public_key_as_string().unwrap());
 
-        first.stop();
-        second.stop();
+        first.stop::<NoFwd>();
+        second.stop::<NoFwd>();
     }
 
     #[traced_test]
@@ -466,8 +466,8 @@ mod tests {
         assert_eq!(res.len(), 4);
         assert!(reference.addresses.iter().zip(res).all(|(x, y)| x.0 == y));
 
-        first.stop();
-        second.stop();
+        first.stop::<NoFwd>();
+        second.stop::<NoFwd>();
     }
 
     #[traced_test]
@@ -500,8 +500,8 @@ mod tests {
 
         assert!(block_on(second.node.store.get(&hash("good morning"))).is_some());
 
-        first.stop();
-        second.stop();
+        first.stop::<NoFwd>();
+        second.stop::<NoFwd>();
     }
 
     #[traced_test]
@@ -544,8 +544,8 @@ mod tests {
         assert!(!res.is_empty());
         assert!(reference.iter().zip(res.iter()).all(|(x, y)| x.id == y.id));
 
-        first.stop();
-        second.stop();
+        first.stop::<NoFwd>();
+        second.stop::<NoFwd>();
     }
 
     #[traced_test]
@@ -631,7 +631,7 @@ mod tests {
             panic!("not a list of nodes");
         }
 
-        first.stop();
-        second.stop();
+        first.stop::<NoFwd>();
+        second.stop::<NoFwd>();
     }
 }

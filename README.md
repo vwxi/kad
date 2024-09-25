@@ -28,5 +28,5 @@ if node.join("bootstrap.example", 16162) {
     }
 }
 
-node.stop();
+node.stop::<IGD>();
 ```

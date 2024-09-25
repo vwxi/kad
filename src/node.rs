@@ -19,12 +19,15 @@ use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use resolve::resolve_host;
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::{Arc, Weak};
 use std::{
     fs,
     io::prelude::*,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
+};
+use std::{
+    str::FromStr,
+    sync::{Arc, Weak},
 };
 use tarpc::context;
 use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
@@ -313,7 +316,9 @@ impl Kad {
     }
 
     /// Stop any running threads and consumes Kad object
-    pub fn stop(self: Arc<Self>) {
+    pub fn stop<F: Forward>(self: Arc<Self>) {
+        let _ = F::remove(self.addr().1);
+
         if let Ok(r) = Arc::try_unwrap(self) {
             {
                 let lock = r.kad_handle.blocking_lock();
@@ -701,14 +706,23 @@ impl Kad {
     ///
     /// Returns true if the join procedure was successful.
     pub fn join(self: &Arc<Self>, ip: &str, port: u16) -> bool {
+        if let Ok(ipp) = IpAddr::from_str(ip) {
+            return self
+                .runtime
+                .handle()
+                .block_on(self.node.clone().join(Addr(ipp, port)));
+        }
+
         if let Ok(ips) = resolve_host(ip) {
             if let Some(ip) = ips.peekable().peek() {
-                let addr = Addr(*ip, port);
-                self.runtime.handle().block_on(self.node.clone().join(addr))
+                self.runtime
+                    .handle()
+                    .block_on(self.node.clone().join(Addr(*ip, port)))
             } else {
                 false
             }
         } else {
+            debug!("HUGH!!!!");
             false
         }
     }
@@ -1258,6 +1272,8 @@ mod tests {
 
     use tracing_test::traced_test;
 
+    use crate::forward::NoFwd;
+
     use super::*;
 
     fn setup(offset: u16) -> Vec<Arc<Kad>> {
@@ -1308,7 +1324,7 @@ mod tests {
             "checking if bucket contains all nodes"
         );
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 
     #[traced_test]
@@ -1329,7 +1345,7 @@ mod tests {
             .iter()
             .all(|n| { block_on(n.node.store.get(&hash("good morning"))).is_some() }));
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 
     #[traced_test]
@@ -1375,7 +1391,7 @@ mod tests {
             );
         });
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 
     #[traced_test]
@@ -1403,6 +1419,6 @@ mod tests {
 
         assert_eq!(res.len(), routing_consts::ADDRESS_LIMIT);
 
-        nodes.into_iter().for_each(Kad::stop);
+        nodes.into_iter().for_each(Kad::stop::<NoFwd>);
     }
 }
