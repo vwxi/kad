@@ -4,6 +4,7 @@ mod lookup;
 pub mod node;
 mod routing;
 mod rpc;
+mod score;
 mod store;
 pub mod util;
 
