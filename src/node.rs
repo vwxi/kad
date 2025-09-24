@@ -211,6 +211,7 @@ impl Kad {
                     ),
                     store: Store::new(innerkad_gadget.clone()),
                     crypto: c,
+                    scoring: ScoreManager::new(hkey, vec![]),
                     parent: kad_gadget.clone(),
                 };
 
@@ -383,16 +384,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
-    /// assert!(!node.put("hello", String::from("good morning"), false).unwrap().is_empty());
+    /// assert!(!node.put("hello", &String::from("good morning"), false).unwrap().is_empty());
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///  
     /// # Arguments
@@ -435,16 +436,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// node.provide("thing").unwrap();
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -499,16 +500,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Kvs<String> = node.get("hello", false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -539,16 +540,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::{Kvs, Hash}};
+    /// use kad::{node::Kad, forward::IGD, util::{Kvs, Hash}};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Kvs<String> = node.get_hash(Hash::from(111), false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -621,16 +622,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Hash};
+    /// use kad::{node::Kad, forward::IGD, util::Hash};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let nodes = node.get_nodes(Hash::from(0));
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     pub fn get_nodes(self: &Arc<Self>, key: Hash) -> Vec<Peer> {
         self.runtime
@@ -643,16 +644,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::{Kvs, ProviderRecord}};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Vec<ProviderRecord> = node.get_providers("hello", false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -694,14 +695,14 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// assert!(node.join("127.0.0.1", 16162));
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Return value
@@ -898,6 +899,7 @@ impl InnerKad {
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
+                scoring: ScoreManager::new(id, vec![]),
                 parent: k,
             };
 
@@ -962,6 +964,7 @@ impl InnerKad {
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
+                scoring: ScoreManager::new(id, vec![]),
                 parent: k,
             };
 
@@ -1041,14 +1044,19 @@ impl InnerKad {
                 resp.id = res.1.id;
                 if hash(result.as_str()) == resp.id {
                     if node.crypto.entry(resp.id, result.as_str()).await {
+                        node.scoring.increase(resp.id).await;
+
                         Ok(resp)
                     } else {
+                        node.scoring.decrease(resp.id).await;
                         Err(Box::new(resp))
                     }
                 } else {
+                    node.scoring.decrease(resp.id).await;
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(res.1.id).await;
                 Err(Box::new(resp))
             }
         }
@@ -1058,11 +1066,16 @@ impl InnerKad {
         get_addresses,
         |id: Hash| RpcOp::GetAddresses(id),
         Vec<Addr>,
-        |_: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
+        |node: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
                 resp.id = res.1.id;
+
+                node.scoring.increase(resp.id).await;
+
                 Ok((addrs, resp))
             } else {
+                node.scoring.decrease(res.1.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1073,17 +1086,44 @@ impl InnerKad {
         ping,
         RpcOp::Ping,
         SinglePeer,
-        |_, res: RpcResults, mut resp: SinglePeer| async move {
+        |node: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             if let RpcResult::Ping = res.0 {
                 resp.id = res.1.id;
+
+                node.scoring.increase(resp.id).await;
+
                 Ok(resp)
             } else {
+                node.scoring.decrease(res.1.id).await;
+
                 Err(Box::new(resp))
             }
         }
     );
 
-    // find_node, find_value and store will update the routing table
+    // get_confidence, find_node, find_value and store will update the routing table
+    kad_fn!(
+        get_confidence,
+        |id: Hash| RpcOp::GetConfidence(id),
+        f64,
+        |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
+            if let RpcResult::GetConfidence(score) = res.0.clone() {
+                if node.crypto.verify_results(&res).await {
+                    node.table.clone().update::<RealPinger>(resp).await;
+
+                    // put score
+                    node.scoring.put_score(resp.id, res.1.id, score).await;
+
+                    Ok((score, resp))
+                } else {
+                    Err(Box::new(resp))
+                }
+            } else {
+                Err(Box::new(resp))
+            }
+        },
+        (id: Hash)
+    );
 
     kad_fn!(
         store,
@@ -1113,12 +1153,17 @@ impl InnerKad {
             if let RpcResult::FindNode(peers) = res.0.clone() {
                 if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
+                    node.scoring.increase(resp.id).await;
 
                     Ok((peers, resp))
                 } else {
+                    node.scoring.decrease(resp.id).await;
+
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(resp.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1133,12 +1178,17 @@ impl InnerKad {
             if let RpcResult::FindValue(result) = res.0.clone() {
                 if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
+                    node.scoring.increase(resp.id).await;
 
                     Ok((result, resp))
                 } else {
+                    node.scoring.decrease(resp.id).await;
+
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(resp.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1201,6 +1251,8 @@ impl InnerKad {
         if let Ok(peer) =
             tokio::task::block_in_place(|| self.clone().ping(Peer::new(Hash::zero(), addr)))
         {
+            self.scoring.increase(peer.id).await;
+
             self.table.clone().update::<RealPinger>(peer).await;
 
             let res = self.clone().iter_find_node(self.clone().table.id).await;

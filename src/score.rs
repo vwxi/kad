@@ -11,6 +11,8 @@ use crate::util::Hash;
 
 pub(crate) mod consts {
     pub(crate) const ALPHA: f64 = 0.95f64;
+    pub(crate) const POSITIVE_R: f64 = 1.0f64;
+    pub(crate) const NEGATIVE_R: f64 = -1.0f64;
 }
 
 type Vector = BTreeMap<Hash, f64>;
@@ -34,11 +36,13 @@ type Matrix = BTreeMap<Hash, BTreeMap<Hash, f64>>;
 //       then we delete the trustee entry in the queue
 // 2. when to obtain trust values
 //    a. periodic operation: iterating over every bucket and updating trust values then running algorithm
-//    b. value retrieval time will now be dependent on trust operation
+//    b. value retrieval time will now be bottlenecked by this procedure
 //    c. update value step: every time the get op requests a trust score, if it doesn't exist add to a search queue which will resolve in either the current or next update step
 //                          queue contains oneshot channels that will wait to recv a score.
 //    d. running algorithm: run until convergence then wait a fixed interval then go back to the update step
 struct Scoring {
+    // own ID
+    id: Hash,
     // "C" matrix, peer: { what peer thinks of other peers }
     pub(self) global: Matrix,
     // initial local vector
@@ -87,6 +91,7 @@ impl Scoring {
         }
 
         Scoring {
+            id,
             global: m,
             local: t.clone(),
             initial: t,
@@ -97,13 +102,23 @@ impl Scoring {
         }
     }
 
-    // add trust value to global matrix
-    pub(self) fn add(&mut self, i: Hash, j: Hash, score: f64) -> bool {
-        // only accept normalized scores
-        if score > 1.0f64 || score < 0.0f64 {
-            return false;
+    // modify our trust in a peer
+    pub(self) fn modify(&mut self, peer: Hash, new: f64) {
+        if new > 1.0f64 || new < 0.0f64 {
+            return;
         }
 
+        self.global.entry(self.id).and_modify(|e| {
+            e.entry(peer)
+                .and_modify(|ee| {
+                    *ee += new;
+                })
+                .or_insert(new);
+        });
+    }
+
+    // add trust value to global matrix
+    pub(self) fn add(&mut self, i: Hash, j: Hash, score: f64) {
         self.global
             .entry(i)
             .and_modify(|e| {
@@ -120,8 +135,6 @@ impl Scoring {
         self.global_max = self.global.iter().fold(0f64, |a, e| {
             e.1.iter().fold(0.0f64, |a, e| a.max(*e.1)).max(a)
         });
-
-        true
     }
 
     fn n_score(&self, i: &Hash, j: &Hash) -> f64 {
@@ -139,7 +152,7 @@ impl Scoring {
         }
     }
 
-    // t(k+1) = (1 − a)CT t(k) + ap
+    // t(k+1) = (1 − a)C^T t(k) + ap
     pub(self) fn iterate(&mut self) {
         let mut tk1: Vector = Vector::new();
 
@@ -157,7 +170,7 @@ impl Scoring {
             }
         }
 
-        // (1 − a)CT t(k)
+        // (1 − a)C^T t(k)
         tk1.iter_mut().for_each(|(en, e)| {
             *e += self.alpha * self.initial.get(en).unwrap_or(&0.0f64);
         });
@@ -179,8 +192,6 @@ impl Scoring {
 
         self.local.clear();
         self.local = tk1;
-
-        debug!("current delta: {}, epsilon: {}", self.delta, self.epsilon);
     }
 
     pub(self) fn run(&mut self) {
@@ -192,7 +203,9 @@ impl Scoring {
     }
 
     pub(self) fn get(&self, i: &Hash) -> f64 {
-        *self.local.get(i).unwrap_or(&0.0f64)
+        self.local
+            .get(i)
+            .map_or_else(|| self.n_score(&self.id, i), |e| *e)
     }
 }
 
@@ -200,27 +213,29 @@ struct ScoreQueueItem {}
 
 pub(crate) struct ScoreManager {
     scoring: Mutex<Scoring>,
-    parent: Weak<InnerKad>,
     queue: Mutex<BTreeMap<Hash, Vec<ScoreQueueItem>>>,
 }
 
 impl ScoreManager {
-    pub(crate) fn new(inner_kad: Weak<InnerKad>, pre_trusted: Vec<Hash>) -> Self {
-        let id;
-        {
-            let ik = inner_kad.upgrade().unwrap();
-            id = ik.table.id;
-        }
-
+    pub(crate) fn new(own_id: Hash, pre_trusted: Vec<Hash>) -> Self {
         ScoreManager {
-            scoring: Mutex::new(Scoring::new(id, consts::ALPHA, pre_trusted)),
-            parent: inner_kad,
+            scoring: Mutex::new(Scoring::new(own_id, consts::ALPHA, pre_trusted)),
             queue: Mutex::new(BTreeMap::new()),
         }
     }
 
-    pub(crate) async fn add_score(&self, i: Hash, j: Hash, score: f64) {
-        let mut lock = self.scoring.try_lock().await;
+    pub(crate) async fn increase(&self, peer: Hash) {
+        let mut lock = self.scoring.lock().await;
+
+        debug!("change reputation of {:#x} by {}", peer, consts::POSITIVE_R);
+        lock.modify(peer, consts::POSITIVE_R);
+    }
+
+    pub(crate) async fn decrease(&self, peer: Hash) {
+        let mut lock = self.scoring.lock().await;
+
+        debug!("change reputation of {:#x} by {}", peer, consts::NEGATIVE_R);
+        lock.modify(peer, consts::NEGATIVE_R);
     }
 
     // this will reset the local vector
@@ -234,6 +249,12 @@ impl ScoreManager {
         let lock = self.scoring.lock().await;
 
         lock.get(&i)
+    }
+
+    pub(crate) async fn put_score(&self, i: Hash, j: Hash, score: f64) {
+        let mut lock = self.scoring.lock().await;
+
+        lock.add(i, j, score)
     }
 }
 
@@ -255,8 +276,6 @@ mod tests {
         trust.add(Hash::from(3), Hash::from(2), 1.0f64);
 
         trust.run();
-
-        debug!("{:?}", trust.local);
 
         assert_eq!(
             trust.local.get(&Hash::from(1)).unwrap(),
@@ -286,8 +305,6 @@ mod tests {
 
         trust.run();
 
-        debug!("{:?}", trust.local);
-
         assert!(
             trust.local.get(&Hash::from(1)).unwrap() == trust.local.get(&Hash::from(2)).unwrap()
         );
@@ -302,7 +319,7 @@ mod tests {
     #[traced_test]
     #[test]
     fn single_pre_trusted() {
-        let mut trust: Scoring = Scoring::new(Hash::from(1), 0.95, vec![Hash::from(1)]);
+        let mut trust: Scoring = Scoring::new(Hash::from(1), 0.95, vec![Hash::from(2)]);
 
         trust.add(Hash::from(1), Hash::from(2), rand::random());
         trust.add(Hash::from(1), Hash::from(3), rand::random());
@@ -313,13 +330,11 @@ mod tests {
 
         trust.run();
 
-        debug!("{:?}", trust.local);
-
         assert!(
-            trust.local.get(&Hash::from(1)).unwrap() > trust.local.get(&Hash::from(2)).unwrap()
+            trust.local.get(&Hash::from(2)).unwrap() > trust.local.get(&Hash::from(3)).unwrap()
         );
         assert!(
-            trust.local.get(&Hash::from(1)).unwrap() > trust.local.get(&Hash::from(3)).unwrap()
+            trust.local.get(&Hash::from(2)).unwrap() > trust.local.get(&Hash::from(1)).unwrap()
         );
     }
 }
