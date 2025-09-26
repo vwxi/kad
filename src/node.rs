@@ -164,12 +164,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns true if successful, false otherwise.
-    pub fn to_file(
-        self: &Arc<Self>,
-        priv_key: &str,
-        pub_key: &str,
-        table_file: Option<&str>,
-    ) -> bool {
+    pub fn to_file(&self, priv_key: &str, pub_key: &str, table_file: Option<&str>) -> bool {
         self.node.crypto.to_file(priv_key, pub_key).is_ok()
             && if let Some(tf) = table_file {
                 let buckets = self
@@ -352,22 +347,22 @@ impl Kad {
     /// # Return value
     ///
     /// Returns the responding peer if successful.
-    pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
+    pub fn ping(&self, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         self.node.clone().ping(peer)
     }
 
     /// Returns the resolved address of a Kad object
-    pub fn addr(self: &Arc<Self>) -> Addr {
+    pub fn addr(&self) -> Addr {
         self.node.external_addr
     }
 
     /// Returns the node ID associated with a Kad object
-    pub fn id(self: &Arc<Self>) -> Hash {
+    pub fn id(&self) -> Hash {
         self.node.table.id
     }
 
     /// Returns the node ID and resolved address in a `SinglePeer` object
-    pub fn as_single_peer(self: &Arc<Self>) -> SinglePeer {
+    pub fn as_single_peer(&self) -> SinglePeer {
         SinglePeer {
             id: self.id(),
             addr: self.node.addr,
@@ -375,7 +370,7 @@ impl Kad {
     }
 
     /// Returns the node ID and resolved addresses in a `Peer` object
-    pub fn as_peer(self: &Arc<Self>) -> Peer {
+    pub fn as_peer(&self) -> Peer {
         self.as_single_peer().peer()
     }
 
@@ -406,7 +401,7 @@ impl Kad {
     ///
     /// Returns an error if any of the sends fail.
     pub fn put<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
+        &self,
         key: &str,
         value: &T,
         compress: bool,
@@ -463,7 +458,7 @@ impl Kad {
     /// # Errors
     ///
     /// Returns any errors during the process.
-    pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>> {
+    pub fn provide(&self, key: &str) -> Result<Vec<SinglePeer>> {
         let record = self
             .node
             .store
@@ -475,7 +470,7 @@ impl Kad {
         self.put(key, &record, false)
     }
 
-    fn lookup(self: &Arc<Self>, key: Hash, disjoint: bool) -> Vec<FindValueResult> {
+    fn lookup(&self, key: Hash, disjoint: bool) -> Vec<FindValueResult> {
         let rt = self.runtime.handle();
 
         if disjoint {
@@ -527,11 +522,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns a list of retrieved valid values.
-    pub fn get<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
-        key: &str,
-        disjoint: bool,
-    ) -> Vec<Kv<T>> {
+    pub fn get<T: Serialize + DeserializeOwned>(&self, key: &str, disjoint: bool) -> Vec<Kv<T>> {
         self.get_hash(hash(key), disjoint)
     }
 
@@ -568,7 +559,7 @@ impl Kad {
     ///
     /// Returns a list of retrieved valid values.
     pub fn get_hash<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
+        &self,
         key: Hash,
         disjoint: bool,
     ) -> Vec<Kv<T>> {
@@ -633,7 +624,7 @@ impl Kad {
     ///
     /// node.stop::<IGD>();
     /// ```
-    pub fn get_nodes(self: &Arc<Self>, key: Hash) -> Vec<Peer> {
+    pub fn get_nodes(&self, key: Hash) -> Vec<Peer> {
         self.runtime
             .handle()
             .block_on(self.node.clone().iter_find_node(key))
@@ -668,7 +659,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns a list of all peers contacted that did not store the value if successful.
-    pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
+    pub fn get_providers(&self, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
         let results = self.lookup(hash(key), disjoint);
 
         results
@@ -708,7 +699,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns true if the join procedure was successful.
-    pub fn join(self: &Arc<Self>, ip: &str, port: u16) -> bool {
+    pub fn join(&self, ip: &str, port: u16) -> bool {
         if let Ok(ipp) = IpAddr::from_str(ip) {
             return self
                 .runtime
@@ -739,7 +730,7 @@ impl Kad {
     ///
     /// If peer doesn't exist in routing table, returns a list of all addresses that respond with a valid key and ID.  
     /// Otherwise, returns addresses from routing table.
-    pub fn resolve(self: &Arc<Self>, id: Hash) -> Vec<Addr> {
+    pub fn resolve(&self, id: Hash) -> Vec<Addr> {
         let rt = self.runtime.handle();
 
         if let Some(n) = rt.block_on(self.node.table.clone().find(id)) {
@@ -754,6 +745,14 @@ impl Kad {
             .filter_map(|a| Some(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok())?)
             .map(|x| x.addr)
             .collect()
+    }
+
+    pub fn sign(&self, data: &str) -> String {
+        self.node.crypto.sign(data)
+    }
+
+    pub async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
+        self.node.crypto.verify(id, data, sig).await
     }
 }
 

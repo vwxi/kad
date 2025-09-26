@@ -57,6 +57,10 @@ struct Scoring {
     delta: f64,
     // epsilon
     epsilon: f64,
+    // mean
+    mean: f64,
+    // sd
+    sd: f64,
 }
 
 impl Scoring {
@@ -99,6 +103,8 @@ impl Scoring {
             alpha: alpha_,
             delta: f64::MAX,
             epsilon: 0.0001f64,
+            mean: 0f64,
+            sd: 0f64,
         }
     }
 
@@ -135,6 +141,20 @@ impl Scoring {
         self.global_max = self.global.iter().fold(0f64, |a, e| {
             e.1.iter().fold(0.0f64, |a, e| a.max(*e.1)).max(a)
         });
+    }
+
+    pub(self) fn remove(&mut self, i: &Hash) {
+        // remove from local and global peer vector
+        let _ = self.local.remove(i);
+        let _ = self.global.remove(i);
+
+        // remove peer's score from every other peer
+        self.global.iter_mut().for_each(|e| {
+            let _ = e.1.remove(i);
+        });
+
+        // recompute local vector
+        self.run();
     }
 
     fn n_score(&self, i: &Hash, j: &Hash) -> f64 {
@@ -200,6 +220,29 @@ impl Scoring {
         while self.delta > self.epsilon {
             self.iterate();
         }
+
+        // calc mean
+        {
+            let mut sum = 0f64;
+            for item in self.local.values() {
+                sum += *item;
+            }
+
+            self.mean = sum / (self.local.len() as f64);
+        }
+
+        // calc sd
+        self.sd = (self
+            .local
+            .values()
+            .fold(0f64, |a, e| a + (*e - self.mean).powi(2))
+            / (self.local.len() as f64))
+            .sqrt();
+
+        debug!(
+            "computed local trust vector, delta: {}, mean: {}, sd: {}",
+            self.delta, self.mean, self.sd
+        );
     }
 
     pub(self) fn get(&self, i: &Hash) -> f64 {
@@ -255,6 +298,12 @@ impl ScoreManager {
         let mut lock = self.scoring.lock().await;
 
         lock.add(i, j, score)
+    }
+
+    pub(crate) async fn remove(&self, i: Hash) {
+        let mut lock = self.scoring.lock().await;
+
+        lock.remove(&i);
     }
 }
 
@@ -321,12 +370,12 @@ mod tests {
     fn single_pre_trusted() {
         let mut trust: Scoring = Scoring::new(Hash::from(1), 0.95, vec![Hash::from(2)]);
 
-        trust.add(Hash::from(1), Hash::from(2), rand::random());
-        trust.add(Hash::from(1), Hash::from(3), rand::random());
-        trust.add(Hash::from(2), Hash::from(1), rand::random());
-        trust.add(Hash::from(2), Hash::from(3), rand::random());
-        trust.add(Hash::from(3), Hash::from(1), rand::random());
-        trust.add(Hash::from(3), Hash::from(2), rand::random());
+        trust.add(Hash::from(1), Hash::from(2), rand::random::<f64>() % 0.6f64);
+        trust.add(Hash::from(1), Hash::from(3), rand::random::<f64>() % 0.6f64);
+        trust.add(Hash::from(2), Hash::from(1), rand::random::<f64>() % 0.6f64);
+        trust.add(Hash::from(2), Hash::from(3), rand::random::<f64>() % 0.6f64);
+        trust.add(Hash::from(3), Hash::from(1), rand::random::<f64>() % 0.6f64);
+        trust.add(Hash::from(3), Hash::from(2), rand::random::<f64>() % 0.6f64);
 
         trust.run();
 
