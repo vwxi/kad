@@ -241,6 +241,7 @@ crate::util::pred_block! {
         }
 
         pub(crate) struct RpcContext {
+            pub(crate) version: String,
             pub(crate) id: Hash,
             pub(crate) op: RpcOp,
             pub(crate) addr: Addr,

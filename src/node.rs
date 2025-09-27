@@ -37,6 +37,7 @@ use tracing::debug;
 pub(crate) mod consts {
     pub(crate) const DISJOINT_PATHS: usize = 3;
     pub(crate) const QUORUM: usize = 3;
+    pub(crate) const VERSION: &'static str = "1.1";
 }
 
 // all of the different facets of the protocol
@@ -1298,6 +1299,7 @@ impl InnerKad {
 
     pub(crate) fn create_ctx(self: &Arc<Self>) -> RpcContext {
         RpcContext {
+            version: String::from(consts::VERSION),
             id: self.table.id,
             op: RpcOp::Nothing,
             addr: self.external_addr,

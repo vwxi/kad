@@ -105,6 +105,7 @@ impl Crypto {
 
     pub(crate) fn args(&self, i: Hash, o: RpcOp, a: Addr, ts: u64) -> RpcArgs {
         let ctx = RpcContext {
+            version: String::from(crate::node::consts::VERSION),
             id: i,
             op: o,
             addr: a,
