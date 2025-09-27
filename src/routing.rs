@@ -461,7 +461,11 @@ impl RoutingTable {
                                     debug!("nothing in cache, erasing node {:#x}", peer.id);
                                 }
 
+                                // remove peer from bucket
                                 bkt.peers.remove(bkt_idx);
+
+                                // remove peer scores
+                                node.scoring.remove(peer.id).await;
 
                                 // remove peer from keyring
                                 node.crypto.remove(&peer.id).await;
@@ -545,7 +549,11 @@ impl RoutingTable {
                                     bkt.add_peer(to_add);
                                 }
 
+                                // remove peer from bucket
                                 bkt.peers.remove(bkt_idx);
+
+                                // remove peer scores
+                                node.scoring.remove(peer.id).await;
 
                                 // remove peer from keyring
                                 node.crypto.remove(&peer.id).await;

@@ -27,6 +27,7 @@ pub(crate) mod consts {
 pub(crate) trait RpcService {
     async fn key() -> RpcResults;
     async fn ping() -> RpcResults;
+    async fn get_confidence(args: RpcArgs) -> RpcResults;
     async fn get_addresses(args: RpcArgs) -> RpcResults;
     async fn store(args: RpcArgs) -> RpcResults;
     async fn find_node(args: RpcArgs) -> RpcResults;
@@ -133,6 +134,25 @@ impl RpcService for Service {
             },
             self.node.create_ctx(),
             String::new(),
+        )
+    }
+
+    async fn get_confidence(self, _: context::Context, args: RpcArgs) -> RpcResults {
+        if let Err(r) = self.verify(&args).await {
+            return r;
+        }
+
+        let sender = SinglePeer::new(args.0.id, args.0.addr);
+
+        self.node.crypto.results(
+            self.node.create_ctx(),
+            if let RpcOp::GetConfidence(id) = args.0.op {
+                self.node.table.clone().update::<RealPinger>(sender).await;
+
+                RpcResult::GetConfidence(self.node.scoring.get_score(id).await)
+            } else {
+                RpcResult::Bad
+            },
         )
     }
 

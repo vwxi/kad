@@ -82,7 +82,7 @@ impl Crypto {
         Ok(())
     }
 
-    pub(crate) fn sign(&self, data: &str) -> String {
+    pub fn sign(&self, data: &str) -> String {
         let mut rng = rand::thread_rng();
 
         self.signing
@@ -91,7 +91,7 @@ impl Crypto {
     }
 
     // verify with existing key
-    pub(crate) async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
+    pub async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
         let keyring = self.keyring.read().await;
 
         let entry = keyring.get(id).expect("hash is not available in keyring");

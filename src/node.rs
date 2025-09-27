@@ -7,6 +7,7 @@ use crate::{
     forward::Forward,
     routing::{consts as routing_consts, RoutingTable, TableRef},
     rpc::{KadNetwork, Network},
+    score::ScoreManager,
     store::{consts as store_consts, Store, StoreEntry},
     util::{
         hash, timestamp, Addr, Data, FindValueResult, Hash, Kv, Peer, ProviderRecord, RpcContext,
@@ -19,12 +20,15 @@ use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use futures::executor::block_on;
 use resolve::resolve_host;
 use serde::{de::DeserializeOwned, Serialize};
-use std::{str::FromStr, sync::{Arc, Weak}};
 use std::{
     fs,
     io::prelude::*,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     time::Duration,
+};
+use std::{
+    str::FromStr,
+    sync::{Arc, Weak},
 };
 use tarpc::context;
 use tokio::{runtime::Runtime, sync::Mutex, task::AbortHandle, time::sleep};
@@ -42,6 +46,7 @@ pub(crate) struct InnerKad {
     pub(crate) crypto: Crypto,
     pub(crate) store: Store,
     pub(crate) table: TableRef,
+    pub(crate) scoring: ScoreManager,
     pub(crate) parent: Weak<Kad>,
 }
 
@@ -159,12 +164,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns true if successful, false otherwise.
-    pub fn to_file(
-        self: &Arc<Self>,
-        priv_key: &str,
-        pub_key: &str,
-        table_file: Option<&str>,
-    ) -> bool {
+    pub fn to_file(&self, priv_key: &str, pub_key: &str, table_file: Option<&str>) -> bool {
         self.node.crypto.to_file(priv_key, pub_key).is_ok()
             && if let Some(tf) = table_file {
                 let buckets = self
@@ -206,6 +206,7 @@ impl Kad {
                     ),
                     store: Store::new(innerkad_gadget.clone()),
                     crypto: c,
+                    scoring: ScoreManager::new(hkey, vec![]),
                     parent: kad_gadget.clone(),
                 };
 
@@ -346,22 +347,22 @@ impl Kad {
     /// # Return value
     ///
     /// Returns the responding peer if successful.
-    pub fn ping(self: Arc<Self>, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
+    pub fn ping(&self, peer: Peer) -> Result<SinglePeer, Box<SinglePeer>> {
         self.node.clone().ping(peer)
     }
 
     /// Returns the resolved address of a Kad object
-    pub fn addr(self: &Arc<Self>) -> Addr {
+    pub fn addr(&self) -> Addr {
         self.node.external_addr
     }
 
     /// Returns the node ID associated with a Kad object
-    pub fn id(self: &Arc<Self>) -> Hash {
+    pub fn id(&self) -> Hash {
         self.node.table.id
     }
 
     /// Returns the node ID and resolved address in a `SinglePeer` object
-    pub fn as_single_peer(self: &Arc<Self>) -> SinglePeer {
+    pub fn as_single_peer(&self) -> SinglePeer {
         SinglePeer {
             id: self.id(),
             addr: self.node.addr,
@@ -369,7 +370,7 @@ impl Kad {
     }
 
     /// Returns the node ID and resolved addresses in a `Peer` object
-    pub fn as_peer(self: &Arc<Self>) -> Peer {
+    pub fn as_peer(&self) -> Peer {
         self.as_single_peer().peer()
     }
 
@@ -378,16 +379,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
-    /// assert!(!node.put("hello", String::from("good morning"), false).unwrap().is_empty());
+    /// assert!(!node.put("hello", &String::from("good morning"), false).unwrap().is_empty());
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///  
     /// # Arguments
@@ -400,7 +401,7 @@ impl Kad {
     ///
     /// Returns an error if any of the sends fail.
     pub fn put<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
+        &self,
         key: &str,
         value: &T,
         compress: bool,
@@ -430,16 +431,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// node.provide("thing").unwrap();
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -457,7 +458,7 @@ impl Kad {
     /// # Errors
     ///
     /// Returns any errors during the process.
-    pub fn provide(self: &Arc<Self>, key: &str) -> Result<Vec<SinglePeer>> {
+    pub fn provide(&self, key: &str) -> Result<Vec<SinglePeer>> {
         let record = self
             .node
             .store
@@ -469,7 +470,7 @@ impl Kad {
         self.put(key, &record, false)
     }
 
-    fn lookup(self: &Arc<Self>, key: Hash, disjoint: bool) -> Vec<FindValueResult> {
+    fn lookup(&self, key: Hash, disjoint: bool) -> Vec<FindValueResult> {
         let rt = self.runtime.handle();
 
         if disjoint {
@@ -494,16 +495,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Kvs<String> = node.get("hello", false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -521,11 +522,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns a list of retrieved valid values.
-    pub fn get<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
-        key: &str,
-        disjoint: bool,
-    ) -> Vec<Kv<T>> {
+    pub fn get<T: Serialize + DeserializeOwned>(&self, key: &str, disjoint: bool) -> Vec<Kv<T>> {
         self.get_hash(hash(key), disjoint)
     }
 
@@ -534,16 +531,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::{Kvs, Hash}};
+    /// use kad::{node::Kad, forward::IGD, util::{Kvs, Hash}};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Kvs<String> = node.get_hash(Hash::from(111), false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -562,7 +559,7 @@ impl Kad {
     ///
     /// Returns a list of retrieved valid values.
     pub fn get_hash<T: Serialize + DeserializeOwned>(
-        self: &Arc<Self>,
+        &self,
         key: Hash,
         disjoint: bool,
     ) -> Vec<Kv<T>> {
@@ -616,18 +613,18 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Hash};
+    /// use kad::{node::Kad, forward::IGD, util::Hash};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let nodes = node.get_nodes(Hash::from(0));
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
-    pub fn get_nodes(self: &Arc<Self>, key: Hash) -> Vec<Peer> {
+    pub fn get_nodes(&self, key: Hash) -> Vec<Peer> {
         self.runtime
             .handle()
             .block_on(self.node.clone().iter_find_node(key))
@@ -638,16 +635,16 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::{Kvs, ProviderRecord}};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// // join etc...
     ///
     /// let values: Vec<ProviderRecord> = node.get_providers("hello", false);
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Arguments
@@ -662,7 +659,7 @@ impl Kad {
     /// # Return value
     ///
     /// Returns a list of all peers contacted that did not store the value if successful.
-    pub fn get_providers(self: &Arc<Self>, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
+    pub fn get_providers(&self, key: &str, disjoint: bool) -> Vec<ProviderRecord> {
         let results = self.lookup(hash(key), disjoint);
 
         results
@@ -689,27 +686,32 @@ impl Kad {
     /// # Example
     ///
     /// ```
-    /// use kad::{node::Kad, util::Kvs};
+    /// use kad::{node::Kad, forward::IGD, util::Kvs};
     ///
-    /// let node = Kad::new(16161, false, true).unwrap();
+    /// let node = Kad::new::<IGD>(16161, false, true).unwrap();
     /// node.clone().serve().unwrap();
     ///
     /// assert!(node.join("127.0.0.1", 16162));
     ///
-    /// node.stop();
+    /// node.stop::<IGD>();
     /// ```
     ///
     /// # Return value
     ///
     /// Returns true if the join procedure was successful.
-    pub fn join(self: &Arc<Self>, ip: &str, port: u16) -> bool {
+    pub fn join(&self, ip: &str, port: u16) -> bool {
         if let Ok(ipp) = IpAddr::from_str(ip) {
-            return self.runtime.handle().block_on(self.node.clone().join(Addr(ipp, port)));
-        } 
+            return self
+                .runtime
+                .handle()
+                .block_on(self.node.clone().join(Addr(ipp, port)));
+        }
 
         if let Ok(ips) = resolve_host(ip) {
             if let Some(ip) = ips.peekable().peek() {
-                self.runtime.handle().block_on(self.node.clone().join(Addr(*ip, port)))
+                self.runtime
+                    .handle()
+                    .block_on(self.node.clone().join(Addr(*ip, port)))
             } else {
                 false
             }
@@ -728,7 +730,7 @@ impl Kad {
     ///
     /// If peer doesn't exist in routing table, returns a list of all addresses that respond with a valid key and ID.  
     /// Otherwise, returns addresses from routing table.
-    pub fn resolve(self: &Arc<Self>, id: Hash) -> Vec<Addr> {
+    pub fn resolve(&self, id: Hash) -> Vec<Addr> {
         let rt = self.runtime.handle();
 
         if let Some(n) = rt.block_on(self.node.table.clone().find(id)) {
@@ -737,12 +739,41 @@ impl Kad {
 
         let addresses = rt.block_on(self.node.clone().resolve(id));
 
-        // remove all addresses whose keys don't resolve to desired ID
+        // remove all addresses whose keys don't resolve to the desired ID
         addresses
             .iter()
             .filter_map(|a| Some(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok())?)
             .map(|x| x.addr)
             .collect()
+    }
+
+    /// Sign messages using client key
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - data to sign
+    ///
+    /// # Return value
+    ///
+    /// Will always return a signature signed by the client's private key.
+    pub fn sign(&self, data: &str) -> String {
+        self.node.crypto.sign(data)
+    }
+
+    /// Verify a signature using an ID-indexed key in the client's keyring.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - message author's ID
+    /// * `data` - message data
+    /// * `sig` - signature data
+    ///
+    /// # Return value
+    ///
+    /// Returns `true` is the signature is valid for the given ID. Otherwise, it returns `false`.
+    /// It may return `false` if the peer's key does not exist in the keyring.
+    pub async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
+        self.node.crypto.verify(id, data, sig).await
     }
 }
 
@@ -888,6 +919,7 @@ impl InnerKad {
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
+                scoring: ScoreManager::new(id, vec![]),
                 parent: k,
             };
 
@@ -952,6 +984,7 @@ impl InnerKad {
                 table: RoutingTable::new(id, gadget.clone()),
                 store: Store::new(gadget.clone()),
                 crypto: c,
+                scoring: ScoreManager::new(id, vec![]),
                 parent: k,
             };
 
@@ -1031,14 +1064,19 @@ impl InnerKad {
                 resp.id = res.1.id;
                 if hash(result.as_str()) == resp.id {
                     if node.crypto.entry(resp.id, result.as_str()).await {
+                        node.scoring.increase(resp.id).await;
+
                         Ok(resp)
                     } else {
+                        node.scoring.decrease(resp.id).await;
                         Err(Box::new(resp))
                     }
                 } else {
+                    node.scoring.decrease(resp.id).await;
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(res.1.id).await;
                 Err(Box::new(resp))
             }
         }
@@ -1048,11 +1086,16 @@ impl InnerKad {
         get_addresses,
         |id: Hash| RpcOp::GetAddresses(id),
         Vec<Addr>,
-        |_: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
+        |node: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             if let RpcResult::GetAddresses(Some(addrs)) = res.0 {
                 resp.id = res.1.id;
+
+                node.scoring.increase(resp.id).await;
+
                 Ok((addrs, resp))
             } else {
+                node.scoring.decrease(res.1.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1063,17 +1106,44 @@ impl InnerKad {
         ping,
         RpcOp::Ping,
         SinglePeer,
-        |_, res: RpcResults, mut resp: SinglePeer| async move {
+        |node: Arc<InnerKad>, res: RpcResults, mut resp: SinglePeer| async move {
             if let RpcResult::Ping = res.0 {
                 resp.id = res.1.id;
+
+                node.scoring.increase(resp.id).await;
+
                 Ok(resp)
             } else {
+                node.scoring.decrease(res.1.id).await;
+
                 Err(Box::new(resp))
             }
         }
     );
 
-    // find_node, find_value and store will update the routing table
+    // get_confidence, find_node, find_value and store will update the routing table
+    kad_fn!(
+        get_confidence,
+        |id: Hash| RpcOp::GetConfidence(id),
+        f64,
+        |node: Arc<InnerKad>, res: RpcResults, resp: SinglePeer| async move {
+            if let RpcResult::GetConfidence(score) = res.0.clone() {
+                if node.crypto.verify_results(&res).await {
+                    node.table.clone().update::<RealPinger>(resp).await;
+
+                    // put score
+                    node.scoring.put_score(resp.id, res.1.id, score).await;
+
+                    Ok((score, resp))
+                } else {
+                    Err(Box::new(resp))
+                }
+            } else {
+                Err(Box::new(resp))
+            }
+        },
+        (id: Hash)
+    );
 
     kad_fn!(
         store,
@@ -1103,12 +1173,17 @@ impl InnerKad {
             if let RpcResult::FindNode(peers) = res.0.clone() {
                 if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
+                    node.scoring.increase(resp.id).await;
 
                     Ok((peers, resp))
                 } else {
+                    node.scoring.decrease(resp.id).await;
+
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(resp.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1123,12 +1198,17 @@ impl InnerKad {
             if let RpcResult::FindValue(result) = res.0.clone() {
                 if node.crypto.verify_results(&res).await {
                     node.table.clone().update::<RealPinger>(resp).await;
+                    node.scoring.increase(resp.id).await;
 
                     Ok((result, resp))
                 } else {
+                    node.scoring.decrease(resp.id).await;
+
                     Err(Box::new(resp))
                 }
             } else {
+                node.scoring.decrease(resp.id).await;
+
                 Err(Box::new(resp))
             }
         },
@@ -1191,6 +1271,8 @@ impl InnerKad {
         if let Ok(peer) =
             tokio::task::block_in_place(|| self.clone().ping(Peer::new(Hash::zero(), addr)))
         {
+            self.scoring.increase(peer.id).await;
+
             self.table.clone().update::<RealPinger>(peer).await;
 
             let res = self.clone().iter_find_node(self.clone().table.id).await;

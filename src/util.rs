@@ -215,6 +215,7 @@ crate::util::pred_block! {
             Key,
             Ping,
             GetAddresses(Hash),
+            GetConfidence(Hash),
             FindNode(Hash),
             FindValue(Hash),
             Store(Hash, Box<StoreEntry>),
@@ -234,6 +235,7 @@ crate::util::pred_block! {
             Ping,
             Store,
             GetAddresses(Option<Vec<Addr>>),
+            GetConfidence(f64),
             FindNode(Vec<SinglePeer>),
             FindValue(Box<FindValueResult>),
         }
