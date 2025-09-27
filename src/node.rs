@@ -739,7 +739,7 @@ impl Kad {
 
         let addresses = rt.block_on(self.node.clone().resolve(id));
 
-        // remove all addresses whose keys don't resolve to desired ID
+        // remove all addresses whose keys don't resolve to the desired ID
         addresses
             .iter()
             .filter_map(|a| Some(self.node.clone().key(Peer::new(Hash::zero(), *a)).ok())?)
@@ -747,10 +747,31 @@ impl Kad {
             .collect()
     }
 
+    /// Sign messages using client key
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - data to sign
+    ///
+    /// # Return value
+    ///
+    /// Will always return a signature signed by the client's private key.
     pub fn sign(&self, data: &str) -> String {
         self.node.crypto.sign(data)
     }
 
+    /// Verify a signature using an ID-indexed key in the client's keyring.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - message author's ID
+    /// * `data` - message data
+    /// * `sig` - signature data
+    ///
+    /// # Return value
+    ///
+    /// Returns `true` is the signature is valid for the given ID. Otherwise, it returns `false`.
+    /// It may return `false` if the peer's key does not exist in the keyring.
     pub async fn verify(&self, id: &Hash, data: &str, sig: &str) -> bool {
         self.node.crypto.verify(id, data, sig).await
     }
