@@ -3,9 +3,9 @@ use crate::{
     util::{timestamp, Data, Entry, Hash, ProviderRecord, SinglePeer, Value},
 };
 use futures::Future;
-use tracing::warn;
 use std::{collections::HashMap, sync::Weak};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 pub(crate) mod consts {
     pub(crate) const MAX_ENTRY_SIZE: usize = 65535;
@@ -91,7 +91,10 @@ impl Store {
             match s {
                 Data::Raw(st) | Data::Compressed(st) => {
                     if st.len() > consts::MAX_ENTRY_SIZE {
-                        warn!("store validate rejection: exceeds maximum accepted size of {}", consts::MAX_ENTRY_SIZE);
+                        warn!(
+                            "store validate rejection: exceeds maximum accepted size of {}",
+                            consts::MAX_ENTRY_SIZE
+                        );
                         return false;
                     }
                 }
@@ -109,7 +112,10 @@ impl Store {
             .await
         {
             // return if unable to acquire
-            warn!("unable to acquire origin key for peer {:x}", entry.0.origin.id);
+            warn!(
+                "unable to acquire origin key for peer {:x}",
+                entry.0.origin.id
+            );
             return false;
         }
 
@@ -152,7 +158,10 @@ impl Store {
             )
             .await
         {
-            warn!("origin signature invalid for origin {:x}", entry.0.origin.id);
+            warn!(
+                "origin signature invalid for origin {:x}",
+                entry.0.origin.id
+            );
 
             return false;
         }
@@ -161,14 +170,21 @@ impl Store {
 
         // check if entry timestamp is not older than allowed time
         if ts - entry.0.timestamp > consts::REPUBLISH_TIME {
-            warn!("timestamp for entry from {:x} is older than {} seconds", entry.0.origin.id, consts::REPUBLISH_TIME);
+            warn!(
+                "timestamp for entry from {:x} is older than {} seconds",
+                entry.0.origin.id,
+                consts::REPUBLISH_TIME
+            );
             return false;
         }
 
         // if provider record, check if expiry has not passed
         if let Value::ProviderRecord(ProviderRecord { expiry: e, .. }) = entry.0.value {
             if ts > e {
-                warn!("provider record from {:x} has passed its expiry of {}", entry.0.origin.id, e);
+                warn!(
+                    "provider record from {:x} has passed its expiry of {}",
+                    entry.0.origin.id, e
+                );
                 return false;
             }
         }
